@@ -118,12 +118,35 @@ async function handleMessage(message) {
   }
 
   if (text === '/web') {
-    await send(chatId, 'напиши так: /web что найти');
+    await send(chatId, [
+      'напиши так: /web что найти',
+      'или /url https://site.com чтобы я прочитала страницу'
+    ]);
     return;
   }
 
   if (text.startsWith('/web ')) {
     await handleWeb(chatId, user, text.slice(5).trim());
+    return;
+  }
+
+  if (text === '/search') {
+    await send(chatId, 'напиши так: /search что найти');
+    return;
+  }
+
+  if (text.startsWith('/search ')) {
+    await handleWeb(chatId, user, text.slice(8).trim());
+    return;
+  }
+
+  if (text === '/url') {
+    await send(chatId, 'напиши так: /url https://site.com/page');
+    return;
+  }
+
+  if (text.startsWith('/url ')) {
+    await handleUrl(chatId, user, text.slice(5).trim());
     return;
   }
 
@@ -190,6 +213,41 @@ async function handleWeb(chatId, user, query) {
   } catch (error) {
     console.error('Web search error:', error.message);
     await send(chatId, 'сейчас не смогла выйти в сеть нормально');
+  }
+}
+
+async function handleUrl(chatId, user, rawUrl) {
+  let url;
+  try {
+    url = new URL(rawUrl);
+    if (!['http:', 'https:'].includes(url.protocol)) throw new Error('bad protocol');
+  } catch {
+    await send(chatId, 'дай нормальную ссылку, начиная с https:// или http://');
+    return;
+  }
+
+  try {
+    const html = await fetchText(url.toString());
+    const text = htmlToText(html).slice(0, 8000);
+    if (!text || text.length < 80) {
+      await send(chatId, 'страница открылась, но полезного текста почти не нашла');
+      return;
+    }
+
+    const prompt = [
+      `Ссылка: ${url.toString()}`,
+      'Прочитай текст страницы и сделай короткую человеческую выжимку.',
+      `Стиль: ${styles[user.style].prompt}`,
+      'Не выдумывай. Если страница выглядит пустой/мусорной, скажи это.',
+      '',
+      text
+    ].join('\n');
+
+    const ai = await callAi(user, prompt);
+    await send(chatId, splitTelegram(ai || `прочитала страницу. коротко:\n${text.slice(0, 1200)}`));
+  } catch (error) {
+    console.error('URL read error:', error.message);
+    await send(chatId, 'не смогла открыть эту страницу. может сайт закрыт, блокирует ботов или требует вход');
   }
 }
 
@@ -366,9 +424,41 @@ function loadEnv() {
 }
 
 async function fetchText(url) {
-  const response = await fetch(url, { headers: { 'User-Agent': 'KcuniBot/1.0' } });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  const response = await fetch(url, {
+    signal: controller.signal,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; KcuniBot/1.0; +https://github.com/Perec-109/Kcuni)',
+      'Accept': 'text/html,application/xhtml+xml,application/xml,text/plain,application/rss+xml;q=0.9,*/*;q=0.8'
+    }
+  }).finally(() => clearTimeout(timeout));
   if (!response.ok) throw new Error(`${response.status}`);
+  const contentType = response.headers.get('content-type') || '';
+  if (!/text|html|xml|json|rss/i.test(contentType)) {
+    throw new Error(`unsupported content type: ${contentType}`);
+  }
   return response.text();
+}
+
+function htmlToText(html) {
+  return String(html)
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<\/(p|div|section|article|header|footer|li|h1|h2|h3|br)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+\n/g, '\n')
+    .replace(/\n\s+/g, '\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function parseRss(xml) {

@@ -125,10 +125,15 @@ async function handleMessage(message) {
     await send(chatId, [
       'привет, я Kcuni)',
       'можешь просто писать мне',
-      'стиль меняется командой /still calm',
-      'если хочешь, можешь кинуть мне пару стикеров, я их запомню и буду иногда отвечать ими'
+      'команды можно посмотреть через /help',
+      'если хочешь, кинь мне пару стикеров, я их запомню'
     ]);
     await saveUsers();
+    return;
+  }
+
+  if (text === '/help' || text === '/commands') {
+    await send(chatId, commandHelp());
     return;
   }
 
@@ -152,6 +157,14 @@ async function handleMessage(message) {
     user.style = style;
     await saveUsers();
     await send(chatId, [`стиль поменяла на ${styles[style].title})`, styles[style].sample]);
+    return;
+  }
+
+  if (['/cute', '/calm', '/playful', '/serious'].includes(text)) {
+    const style = text.slice(1);
+    user.style = style;
+    await saveUsers();
+    await send(chatId, [`стиль: ${styles[style].title}`, styles[style].sample]);
     return;
   }
 
@@ -183,8 +196,32 @@ async function handleMessage(message) {
     return;
   }
 
-  if (text === '/news') {
-    await handleNews(chatId, user);
+  if (text === '/topics') {
+    await send(chatId, [
+      'какие новости тебе кидать?',
+      '/topics interesting - интересные',
+      '/topics sad - грустные/важные',
+      '/topics war - война/конфликты',
+      '/topics tech - технологии/ИИ',
+      '/topics mixed - всё понемногу'
+    ]);
+    return;
+  }
+
+  if (text.startsWith('/topics ')) {
+    const topic = text.split(/\s+/)[1]?.toLowerCase();
+    if (!['interesting', 'sad', 'war', 'tech', 'mixed'].includes(topic)) {
+      await send(chatId, 'выбери: interesting, sad, war, tech, mixed');
+      return;
+    }
+    user.newsTopic = topic;
+    await saveUsers();
+    await send(chatId, `окей, буду подбирать новости: ${topic}`);
+    return;
+  }
+
+  if (text === '/news' || text === '/new') {
+    await handleNews(chatId, user, user.newsTopic || 'mixed');
     return;
   }
 
@@ -248,6 +285,24 @@ async function generateReply(user, text) {
   const contextual = contextualLocalReply(user, text);
   if (contextual) return contextual;
   return localReply(user, text);
+}
+
+function commandHelp() {
+  return [
+    'команды Kcuni:',
+    '/start - запустить',
+    '/help - список команд',
+    '/cute /calm /playful /serious - быстро сменить стиль',
+    '/still calm - сменить стиль старым способом',
+    '/new или /news - новости',
+    '/topics - выбрать тип новостей',
+    '/web запрос - поиск в интернете',
+    '/url ссылка - прочитать страницу',
+    '/proactive - включить/выключить, чтобы я сама писала',
+    '/stickers - стикеры',
+    '/memory - что я помню',
+    '/forget - очистить память'
+  ];
 }
 
 function contextualLocalReply(user, text) {
@@ -450,6 +505,11 @@ function startProactiveLoop() {
 
 async function proactiveMessage(user) {
   const style = styles[user.style] || styles.cute;
+  if (Math.random() < 0.55) {
+    const news = await buildNewsDigest(user, user.newsTopic || 'mixed', true);
+    if (news) return news;
+  }
+
   const variants = {
     cute: ['привет) я тут вспомнила про тебя', 'эй, как ты там?', 'я тут немного зависла и подумала о тебе)'],
     calm: ['привет, дорогой. как ты?', 'я тут прочитала кое-что и вспомнила про тебя)', 'как настроение? я что-то сама решила написать'],
@@ -586,34 +646,69 @@ async function transcribeTelegramAudio(user, fileUrl) {
   }
 }
 
-async function handleNews(chatId, user) {
-  const feeds = (env.NEWS_FEEDS || '').split(',').map((item) => item.trim()).filter(Boolean);
-  if (!feeds.length) {
-    await send(chatId, 'новостные источники не настроены. добавь NEWS_FEEDS в .env');
+async function handleNews(chatId, user, topic = 'mixed') {
+  const digest = await buildNewsDigest(user, topic, false);
+  if (!digest) {
+    await send(chatId, 'я сейчас не смогла нормально достать новости');
     return;
   }
+  await send(chatId, splitTelegram(digest));
+}
+
+async function buildNewsDigest(user, topic = 'mixed', proactive = false) {
+  const feeds = (env.NEWS_FEEDS || '').split(',').map((item) => item.trim()).filter(Boolean);
+  if (!feeds.length) return '';
 
   const items = [];
   for (const feed of feeds.slice(0, 4)) {
     try {
       const xml = await fetchText(feed);
-      items.push(...parseRss(xml).slice(0, 4));
+      items.push(...parseRss(xml).slice(0, 6));
     } catch (error) {
       console.error('News feed failed:', feed, error.message);
     }
   }
 
-  if (!items.length) {
-    await send(chatId, 'я не смогла сейчас достать новости');
-    return;
-  }
+  if (!items.length) return '';
 
-  const digest = items.slice(0, 5).map((item, index) => `${index + 1}. ${item.title}`).join('\n');
-  const prompt = `Сделай очень короткую дружелюбную выжимку новостей. Стиль: ${styles[user.style].prompt}\n\n${digest}`;
+  const filtered = filterNewsByTopic(items, topic).slice(0, 5);
+  if (!filtered.length) return '';
+
+  const digest = filtered.map((item, index) => `${index + 1}. ${item.title}`).join('\n');
+  const topicLabel = {
+    interesting: 'интересные и необычные',
+    sad: 'грустные или важные',
+    war: 'война, конфликты, безопасность',
+    tech: 'технологии и ИИ',
+    mixed: 'разные'
+  }[topic] || 'разные';
+
+  const prompt = [
+    proactive
+      ? 'Напиши как Kcuni сама. Начни естественно: "я тут прочитала..." или "слушай, увидела...". Не как новостной бот.'
+      : 'Сделай короткую дружелюбную выжимку новостей.',
+    `Тип новостей: ${topicLabel}.`,
+    `Стиль: ${(styles[user.style] || styles.calm).prompt}`,
+    'Если тема тяжёлая, говори мягко, без жести ради жести.',
+    digest
+  ].join('\n\n');
+
   const ai = await callAi(user, prompt);
-  await send(chatId, splitTelegram(ai || `я тут прочитала новости:\n${digest}`));
+  return ai || `я тут прочитала ${topicLabel} новости:\n${digest}`;
 }
 
+function filterNewsByTopic(items, topic) {
+  const patterns = {
+    interesting: /нов|нашл|учен|исслед|необыч|редк|впервые|интерес|космос|животн|истор|откры/i,
+    sad: /погиб|умер|катастроф|авар|пожар|жертв|болез|кризис|потер|бедств/i,
+    war: /войн|удар|ракет|дрон|фронт|арм|обстрел|конфликт|переговор|санкц|безопас/i,
+    tech: /ии|ai|нейро|openai|google|apple|tesla|робот|технолог|чип|смартфон|софт|модель/i,
+    mixed: /./
+  };
+  const pattern = patterns[topic] || patterns.mixed;
+  const matched = items.filter((item) => pattern.test(item.title));
+  return matched.length ? matched : items;
+}
 async function handleWeb(chatId, user, query) {
   if (!query) {
     await send(chatId, 'напиши так: /web что найти');

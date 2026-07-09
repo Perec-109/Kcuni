@@ -75,7 +75,7 @@ async function handleMessage(message) {
       user.stickers = user.stickers.slice(-30);
       await saveUsers();
     }
-    await maybeSendSticker(chatId, user, 1);
+    await maybeSendSticker(chatId, user, 0.65, 'стикер');
     await send(chatId, localReply(user, 'стикер'));
     return;
   }
@@ -89,7 +89,7 @@ async function handleMessage(message) {
     await saveUsers();
     const reply = await describeTelegramFile(user, fileId, 'photo', caption);
     await send(chatId, splitTelegram(reply));
-    await maybeSendSticker(chatId, user, 0.18);
+    await maybeSendSticker(chatId, user, 0.08, 'photo');
     return;
   }
 
@@ -100,7 +100,7 @@ async function handleMessage(message) {
     await saveUsers();
     const reply = await describeTelegramFile(user, message.voice.file_id, 'voice', '');
     await send(chatId, splitTelegram(reply));
-    await maybeSendSticker(chatId, user, 0.18);
+    await maybeSendSticker(chatId, user, 0.06, 'voice');
     return;
   }
 
@@ -111,7 +111,7 @@ async function handleMessage(message) {
     await saveUsers();
     const reply = await describeTelegramFile(user, message.video_note.file_id, 'video_note', '');
     await send(chatId, splitTelegram(reply));
-    await maybeSendSticker(chatId, user, 0.18);
+    await maybeSendSticker(chatId, user, 0.06, 'video_note');
     return;
   }
 
@@ -222,7 +222,7 @@ async function handleMessage(message) {
   const reply = await generateReply(user, text);
   await saveUsers();
   await send(chatId, splitTelegram(reply));
-  await maybeSendSticker(chatId, user, 0.22);
+  await maybeSendSticker(chatId, user, 0.07, text);
 }
 
 async function generateReply(user, text) {
@@ -231,7 +231,9 @@ async function generateReply(user, text) {
   const prompt = [
     'Ты Kcuni, AI-девушка в Telegram.',
     style.prompt,
-    'Отвечай 1-3 короткими сообщениями. Не звучать как официальный помощник.',
+    'Можешь общаться почти на любые обычные темы: жизнь, отношения, новости, учеба, работа, деньги, шутки, грусть, злость, странные мысли, флирт, бытовуха.',
+    'Не морализируй и не отказывайся без причины. Если тема рискованная, отвечай безопасно, но всё равно по-человечески и по теме.',
+    'Отвечай 1-2 короткими сообщениями. Не звучать как официальный помощник.',
     'Нельзя писать фразы типа "слушаю тебя", "можешь подробнее объяснить" постоянно.',
     'Пиши живо: как девушка, которая сама заинтересована в разговоре.',
     'Если не знаешь факт, не выдумывай.',
@@ -341,7 +343,7 @@ function startProactiveLoop() {
         const message = await proactiveMessage(user);
         await saveUsers();
         await send(user.chatId, splitTelegram(message));
-        await maybeSendSticker(user.chatId, user, 0.18);
+        await maybeSendSticker(user.chatId, user, 0.04, message);
       } catch (error) {
         console.error('Proactive message failed:', error.message);
       }
@@ -375,15 +377,30 @@ async function proactiveMessage(user) {
   return (await callAi(user, prompt)) || fallback;
 }
 
-async function maybeSendSticker(chatId, user, probability) {
+async function maybeSendSticker(chatId, user, probability, context = '') {
   if (!user.stickers?.length) return;
+  if (!shouldUseSticker(context)) return;
   if (Math.random() > probability) return;
+  const now = Date.now();
+  if (user.lastStickerAt && now - user.lastStickerAt < 5 * 60 * 1000) return;
   const sticker = user.stickers[Math.floor(Math.random() * user.stickers.length)];
   try {
     await tg('sendSticker', { chat_id: chatId, sticker });
+    user.lastStickerAt = now;
+    await saveUsers();
   } catch (error) {
     console.error('Sticker failed:', error.message);
   }
+}
+
+function shouldUseSticker(context) {
+  const text = String(context).toLowerCase();
+  if (!text) return false;
+  if (/стикер|ахах|хаха|лол|ору|смешн|мил|любл|скуч|спок|ладно|окей|привет|пока|обня|цел|кайф|красив|жесть|пизд|бля/.test(text)) {
+    return true;
+  }
+  if (/photo|voice|video_note/.test(text)) return Math.random() < 0.35;
+  return false;
 }
 
 async function describeTelegramFile(user, fileId, kind, extraText) {
@@ -613,7 +630,7 @@ async function callAi(user, prompt) {
         model: env.OPENAI_MODEL || 'gpt-4.1-mini',
         temperature: user.style === 'serious' ? 0.4 : 0.85,
         messages: [
-          { role: 'system', content: 'You are Kcuni. Follow the user style and answer in Russian by default. Do not sound like an assistant.' },
+          { role: 'system', content: 'You are Kcuni. Follow the user style and answer in Russian by default. You can talk about almost any normal topic. Do not sound like an assistant. Do not moralize. If a topic is risky, keep it safe but still answer naturally.' },
           { role: 'user', content: prompt }
         ]
       })
@@ -714,7 +731,7 @@ async function fetchText(url) {
   const response = await fetch(url, {
     signal: controller.signal,
     headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; KcuniBot/1.0; +https://github.com/Perec-109/Kcuni)',
+      'User-Agent': 'Mozilla/5.0 (compatible; KcuniBot/1.0)',
       Accept: 'text/html,application/xhtml+xml,application/xml,text/plain,application/rss+xml;q=0.9,*/*;q=0.8'
     }
   }).finally(() => clearTimeout(timeout));

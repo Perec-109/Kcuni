@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Kcuni - AI-девушка для Telegram: диалоги, память, новости и настраиваемый стиль общения.">
+  <title>Kcuni - AI девушка в Telegram</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#top"><span>K</span>Kcuni</a>
+    <nav>
+      <a href="#telegram">Telegram</a>
+      <a href="#style">Стиль</a>
+      <a href="#news">Новости</a>
+      <a href="#setup">Запуск</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section class="hero reveal">
+      <div class="aura one"></div>
+      <div class="aura two"></div>
+      <div class="hero-copy">
+        <p class="eyebrow">AI character · Telegram · memory</p>
+        <h1>Kcuni - AI-девушка, которая живёт в Telegram</h1>
+        <p class="lead">
+          Она отвечает в личке, поддерживает диалог, помнит важные вещи,
+          читает каналы с новостями и может сама написать, когда есть что сказать.
+        </p>
+        <div class="actions">
+          <a class="btn primary" href="#setup">Как запустить</a>
+          <a class="btn ghost" href="https://github.com/Perec-109/Kcuni">GitHub</a>
+        </div>
+      </div>
+      <div class="phone" aria-label="Пример диалога">
+        <div class="phone-head">
+          <span class="avatar">K</span>
+          <div><strong>Kcuni</strong><small>online</small></div>
+        </div>
+        <div class="chat">
+          <p class="msg her">я тут</p>
+          <p class="msg her">увидела пару новостей в каналах</p>
+          <p class="msg her">хочешь коротко расскажу, без полотна?</p>
+          <p class="msg you">давай</p>
+          <p class="msg her">окей, ща самым важным</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="cards reveal" id="telegram">
+      <article>
+        <span class="icon">01</span>
+        <h2>Не обычный бот</h2>
+        <p>Kcuni работает через TDLib как отдельный Telegram-аккаунт. Она видит лички, группы и каналы почти как живой пользователь.</p>
+      </article>
+      <article>
+        <span class="icon">02</span>
+        <h2>Сама поддерживает диалог</h2>
+        <p>Может отвечать короткими сообщениями, открывать чаты, вспоминать прошлые разговоры и не писать, если момент не подходит.</p>
+      </article>
+      <article>
+        <span class="icon">03</span>
+        <h2>Память через дневник</h2>
+        <p>Важные события, люди, обещания и новости сохраняются в дневник, чтобы потом всплывать в разговоре естественно.</p>
+      </article>
+    </section>
+
+    <section class="panel reveal" id="style">
+      <div>
+        <p class="eyebrow">Настройка характера</p>
+        <h2>Стиль меняется прямо в Telegram</h2>
+        <p>Пишешь Kcuni команду с телефона, и она сразу переключает манеру общения. Без файлов, без компьютера, без панели администратора.</p>
+      </div>
+      <div class="style-switcher">
+        <button class="active" data-style="cute">Няшная</button>
+        <button data-style="calm">Спокойная</button>
+        <button data-style="playful">Дерзкая</button>
+        <button data-style="serious">Серьёзная</button>
+      </div>
+      <div class="sample" id="styleSample">
+        <strong>Пример:</strong>
+        <p>мгм, я рядом. увидела новость и почему-то сразу подумала о тебе)</p>
+      </div>
+      <div class="command-box">
+        <span>Команды в Telegram</span>
+        <code>/still cute</code>
+        <code>/still calm</code>
+        <code>/still playful</code>
+        <code>/still serious</code>
+      </div>
+    </section>
+
+    <section class="split reveal" id="news">
+      <div>
+        <p class="eyebrow">Новости и каналы</p>
+        <h2>Она может читать Telegram-каналы</h2>
+        <p>
+          Подписываешь аккаунт Kcuni на нужные каналы. Она видит новые посты,
+          отличает новости от рекламы, сохраняет важное и может прислать тебе короткую выжимку.
+        </p>
+      </div>
+      <ol class="steps">
+        <li>Создай отдельный Telegram-аккаунт для Kcuni.</li>
+        <li>Подпиши его на нужные каналы.</li>
+        <li>Запусти C++ приложение с TDLib.</li>
+        <li>Напиши `/still cute` или другой стиль прямо в Telegram.</li>
+        <li>Kcuni читает каналы, пишет в дневник и отвечает в личке.</li>
+      </ol>
+    </section>
+
+    <section class="setup reveal" id="setup">
+      <p class="eyebrow">Запуск</p>
+      <h2>Что уже есть в проекте</h2>
+      <div class="setup-grid">
+        <div><strong>TelegramClient</strong><span>логин через TDLib, чтение чатов, отправка сообщений</span></div>
+        <div><strong>OpenAI/Ollama</strong><span>LLM-ядро для ответов, размышлений и инструментов</span></div>
+        <div><strong>Diary</strong><span>память, события, люди, новости, эмоции</span></div>
+        <div><strong>Character config</strong><span>настройка личности и стиля общения</span></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <strong>Kcuni</strong>
+    <span>AI Telegram character by Perec-109</span>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

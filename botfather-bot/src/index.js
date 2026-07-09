@@ -12,6 +12,7 @@ if (!BOT_TOKEN) {
 const API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const DATA_DIR = new URL('../data/', import.meta.url);
 const USERS_FILE = new URL('../data/users.json', import.meta.url);
+const MAX_MESSAGES_PER_REPLY = Number(env.MAX_MESSAGES_PER_REPLY || 2);
 
 const styles = {
   cute: {
@@ -76,6 +77,41 @@ async function handleMessage(message) {
     }
     await maybeSendSticker(chatId, user, 1);
     await send(chatId, localReply(user, 'стикер'));
+    return;
+  }
+
+  if (message.photo?.length) {
+    user.lastSeenAt = Date.now();
+    user.chatId = chatId;
+    const fileId = message.photo.at(-1).file_id;
+    const caption = message.caption ? ` подпись: ${message.caption}` : '';
+    remember(user, `[photo]${caption}`);
+    await saveUsers();
+    const reply = await describeTelegramFile(user, fileId, 'photo', caption);
+    await send(chatId, splitTelegram(reply));
+    await maybeSendSticker(chatId, user, 0.18);
+    return;
+  }
+
+  if (message.voice?.file_id) {
+    user.lastSeenAt = Date.now();
+    user.chatId = chatId;
+    remember(user, '[voice message]');
+    await saveUsers();
+    const reply = await describeTelegramFile(user, message.voice.file_id, 'voice', '');
+    await send(chatId, splitTelegram(reply));
+    await maybeSendSticker(chatId, user, 0.18);
+    return;
+  }
+
+  if (message.video_note?.file_id) {
+    user.lastSeenAt = Date.now();
+    user.chatId = chatId;
+    remember(user, '[video note]');
+    await saveUsers();
+    const reply = await describeTelegramFile(user, message.video_note.file_id, 'video_note', '');
+    await send(chatId, splitTelegram(reply));
+    await maybeSendSticker(chatId, user, 0.18);
     return;
   }
 
@@ -350,6 +386,92 @@ async function maybeSendSticker(chatId, user, probability) {
   }
 }
 
+async function describeTelegramFile(user, fileId, kind, extraText) {
+  const fileUrl = await getTelegramFileUrl(fileId);
+
+  if (kind === 'photo') {
+    if (!env.OPENAI_API_KEY) {
+      return extraText
+        ? `вижу фотку.${extraText} но нормально рассмотреть смогу, когда подключишь AI-ключ с vision`
+        : 'вижу фотку) нормально описывать картинки смогу, когда подключишь AI-ключ с vision';
+    }
+    const prompt = [
+      'Опиши фото коротко, по-русски, живо, от лица Kcuni.',
+      `Стиль: ${(styles[user.style] || styles.cute).prompt}`,
+      extraText ? `Подпись пользователя:${extraText}` : ''
+    ].join('\n');
+    return await callVision(user, prompt, fileUrl) || 'вижу фотку, но сейчас не смогла нормально разобрать';
+  }
+
+  if (kind === 'voice') {
+    if (!env.OPENAI_API_KEY) return 'я получила голосовое, но расшифровку надо подключить через AI-ключ';
+    return await transcribeTelegramAudio(user, fileUrl) || 'я получила голосовое, но не смогла его разобрать';
+  }
+
+  if (kind === 'video_note') {
+    return 'вижу кружок) пока могу только заметить его, а нормально понимать видео надо подключать через vision/распознавание';
+  }
+
+  return 'получила файл';
+}
+
+async function getTelegramFileUrl(fileId) {
+  const file = await tg('getFile', { file_id: fileId });
+  return `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
+}
+
+async function callVision(user, prompt, imageUrl) {
+  try {
+    const response = await fetch(`${env.OPENAI_BASE_URL || 'https://api.openai.com/v1'}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: env.OPENAI_VISION_MODEL || env.OPENAI_MODEL || 'gpt-4.1-mini',
+        temperature: 0.7,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: imageUrl } }
+          ]
+        }]
+      })
+    });
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content?.trim() || '';
+  } catch (error) {
+    console.error('Vision error:', error.message);
+    return '';
+  }
+}
+
+async function transcribeTelegramAudio(user, fileUrl) {
+  try {
+    const audio = await fetch(fileUrl).then((r) => r.blob());
+    const form = new FormData();
+    form.append('model', env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1');
+    form.append('file', audio, 'voice.ogg');
+    const response = await fetch(`${env.OPENAI_BASE_URL || 'https://api.openai.com/v1'}/audio/transcriptions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` },
+      body: form
+    });
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    const data = await response.json();
+    const text = data.text?.trim();
+    if (!text) return '';
+    remember(user, `[voice transcript] ${text}`);
+    return generateReply(user, text);
+  } catch (error) {
+    console.error('Transcription error:', error.message);
+    return '';
+  }
+}
+
 async function handleNews(chatId, user) {
   const feeds = (env.NEWS_FEEDS || '').split(',').map((item) => item.trim()).filter(Boolean);
   if (!feeds.length) {
@@ -542,7 +664,7 @@ async function tg(method, payload) {
 
 async function send(chatId, textOrMessages) {
   const messages = Array.isArray(textOrMessages) ? textOrMessages : [textOrMessages];
-  for (const text of messages.filter(Boolean).slice(0, 5)) {
+  for (const text of messages.filter(Boolean).slice(0, MAX_MESSAGES_PER_REPLY)) {
     await tg('sendMessage', { chat_id: chatId, text });
     await sleep(380);
   }
@@ -554,7 +676,7 @@ function splitTelegram(text) {
     .map((line) => line.trim())
     .filter(Boolean)
     .flatMap((line) => line.length > 700 ? line.match(/.{1,700}/g) : [line])
-    .slice(0, 5);
+    .slice(0, MAX_MESSAGES_PER_REPLY);
 }
 
 async function readJson(path, fallback) {

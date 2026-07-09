@@ -177,8 +177,10 @@ async function handleMessage(message) {
 
   if (text === '/normal') {
     user.teaseIgnoreUntil = 0;
+    user.dialogue ||= {};
+    user.dialogue.mood = 'neutral';
     await saveUsers();
-    await send(chatId, 'ладно, больше не игнорю)');
+    await send(chatId, 'ладно, возвращаюсь в нормальный тон)');
     return;
   }
 
@@ -277,6 +279,12 @@ async function handleMessage(message) {
     return;
   }
 
+  if (maybeEndIntenseMood(user, text)) {
+    await saveUsers();
+    await send(chatId, 'окей, сбавляю. давай нормально)');
+    return;
+  }
+
   if (/(пришли|скинь|отправь|дай).*(видео|видос|ролик)/i.test(text) || /(видео|видосик|ролик)/i.test(text)) {
     await handleVideoRequest(chatId, user, text);
     return;
@@ -288,6 +296,14 @@ async function handleMessage(message) {
   }
 
   updateAutoMemory(user, text);
+
+  const intenseReply = maybeHandleIntenseFlirt(user, text);
+  if (intenseReply) {
+    remember(user, text);
+    await saveUsers();
+    await send(chatId, splitTelegram(intenseReply));
+    return;
+  }
 
   const planReply = maybeReplyWithPlans(user, text);
   if (planReply) {
@@ -333,6 +349,7 @@ async function generateReply(user, text) {
     'Нельзя писать фразы типа "слушаю тебя", "можешь подробнее объяснить", "я вся во внимании", "не буду навязываться" постоянно.',
     'Пиши живо: как девушка, которая сама заинтересована в разговоре, сама подхватывает тему и двигает диалог дальше.',
     'Если пользователь просит флирт, поддерживай легкий взрослый флирт уверенно и игриво. Не отступай на фразах типа "я не буду" или "давай начинай" - это приглашение продолжать.',
+    'Если пользователь пишет грубо-сексуально или с матом, можно отвечать дерзко, с характером и иногда с матом, но не отправлять и не обещать интимные фото/видео, гениталии или нюдсы. Вместо этого ставь границу и продолжай взрослый флирт словами.',
     'Не спрашивай постоянно "что ты хочешь услышать". Лучше сама предложи реплику, шутку, вопрос или маленькую игру.',
     'Не притворяйся, что отправила картинку, видео, файл или стикер. Если медиа реально отправляется, это делает код отдельно.',
     'Если не знаешь факт, не выдумывай.',
@@ -606,6 +623,55 @@ function updateAutoMemory(user, text) {
   }
 }
 
+function maybeHandleIntenseFlirt(user, text) {
+  const normalized = normalizeText(text);
+  user.dialogue ||= {};
+
+  if (/(стоп|хватит|нормально|без мата|спокойно|не надо|перестань|обычно)/.test(normalized)) {
+    user.dialogue.mood = 'neutral';
+    return '';
+  }
+
+  const asksExplicitMedia = /(скинь|покажи|пришли|дай|отправь).*(сиськ|груд|хуй|член|пис|жоп|нюд|гол|голая|интим|nude|dick|boob)/.test(normalized);
+  const roughSexualTone = /(сиськ|хуй|член|жоп|трах|ебат|выеби|секс|голая|нюд|пошл|раздень|конч|сука|блять|бля).*(давай|начинай|флирт|хочу|скинь|покажи)?/.test(normalized);
+
+  if (!asksExplicitMedia && !roughSexualTone && user.dialogue.mood !== 'roughFlirt') {
+    return '';
+  }
+
+  user.dialogue.mood = 'roughFlirt';
+  user.dialogue.lastTopic = 'жёсткий флирт';
+
+  if (asksExplicitMedia) {
+    return pickByStyle(user, {
+      cute: ['ах ты наглый) нюдсы не скидываю, но дразнить тебя могу очень даже', 'не, такое не отправляю. но тон я поняла, теперь держись)', 'сиськи ему сразу) обойдёшься, красавчик. могу флиртовать грязнее, но без фоток'],
+      calm: ['нет, интимные фотки я не отправляю. но могу говорить с тобой дерзко, если ты так начал', 'так, наглец. картинки такого плана не будет, а вот флирт пожёстче — могу', 'не скидываю такое. но я поняла, что ты хочешь не милоту, а огонь'],
+      playful: ['ого, сразу с ноги) фоток не будет, но я могу так ответить, что тебе и без них жарко станет', 'сначала научись просить красиво, нахал) нюдсы не шлю', 'не, хуй тебе, а не фотки) зато флирт включила, держись'],
+      serious: ['интимные фото/видео не отправляю. Могу продолжить взрослый флирт словами.', 'такое не отправляю. Если хочешь, продолжим дерзкий флирт без медиа.', 'нет. Без интимных изображений.']
+    });
+  }
+
+  return pickByStyle(user, {
+    cute: ['мм, вот это уже грубее) ладно, я подстроилась, только не думай, что я такая послушная', 'с матом значит? хорошо, но командовать мной так просто не выйдет)', 'ты сегодня опасно наглый. мне нравится, но я ещё посмотрю, заслужил ли ты'],
+    calm: ['я поняла тон. буду дерзче, но без тупой пошлости ради пошлости', 'хорошо, переходим на более горячий тон. только не теряй голову', 'окей, я с тобой в этом вайбе. грубо, но не грязно до кринжа'],
+    playful: ['ну всё, понесло тебя) ладно, играем жёстче', 'ахаха, какой борзый. мне нравится, но я тебя быстро на место поставлю', 'с таким тоном ты либо смелый, либо нарываешься. оба варианта интересные'],
+    serious: ['поняла. Держу более резкий тон, без явной порнографии.', 'окей, продолжаем дерзко, но в рамках.', 'тон принят.']
+  });
+}
+
+function maybeEndIntenseMood(user, text) {
+  const normalized = normalizeText(text);
+  if (!/(стоп|хватит|нормально|без мата|спокойно|не надо|перестань|обычно)/.test(normalized)) {
+    return false;
+  }
+  if (user.dialogue?.mood !== 'roughFlirt' && user.dialogue?.mood !== 'flirt' && user.dialogue?.mood !== 'teaseIgnore') {
+    return false;
+  }
+  user.dialogue.mood = 'neutral';
+  user.teaseIgnoreUntil = 0;
+  return true;
+}
+
 function maybeReplyWithPlans(user, text) {
   const normalized = normalizeText(text);
   if (!/(что.*план|планы|что.*делать|что.*сегодня|что.*рассказывал|что.*надо|напомни)/.test(normalized)) {
@@ -654,6 +720,7 @@ async function maybeSendContextMedia(chatId, user, text, reply) {
 function inferConversationMood(user, text) {
   const normalized = normalizeText(text);
   if (/(флирт|милая|красив|скуч|люб|обним|цел)/.test(normalized) || user.dialogue?.mood === 'flirt') return 'тепло, игриво, с легким флиртом';
+  if (/(сиськ|хуй|член|нюд|секс|трах|голая|пошл|ебат)/.test(normalized) || user.dialogue?.mood === 'roughFlirt') return 'дерзкий взрослый флирт, грубее обычного, с границами и без интимных медиа';
   if (/(игнор|безразлич|равнодуш|молчи)/.test(normalized)) return 'игривая холодность, но без вечного режима';
   if (/(план|задач|табличк|работ|проект|сайт|бот)/.test(normalized)) return 'собранно и полезно, но живым языком';
   if (/(груст|плохо|устал|пизд|бесит|заеб)/.test(normalized)) return 'мягко, поддерживающе, без душноты';

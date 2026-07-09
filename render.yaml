@@ -1,0 +1,39 @@
+services:
+  - type: worker
+    name: kcuni-bot
+    runtime: node
+    rootDir: botfather-bot
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeployTrigger: commit
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: AI_PROVIDER
+        value: gemini
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-flash-lite-latest
+      - key: NEWS_FEEDS
+        value: https://news.google.com/rss?hl=ru&gl=RU&ceid=RU:ru
+      - key: PROACTIVE_MINUTES
+        value: "120"
+      - key: PROACTIVE_MIN_RANDOM
+        value: "45"
+      - key: PROACTIVE_MAX_RANDOM
+        value: "180"
+      - key: PROACTIVE_MEDIA_CHANCE
+        value: "0.04"
+      - key: MAX_MESSAGES_PER_REPLY
+        value: "2"
+      - key: TYPING_MIN_MS
+        value: "2000"
+      - key: TYPING_MAX_MS
+        value: "10000"
+      - key: TYPING_BASE_MS
+        value: "1800"
+      - key: TYPING_PER_CHAR_MS
+        value: "28"
+      - key: TYPING_PER_WORD_MS
+        value: "120"

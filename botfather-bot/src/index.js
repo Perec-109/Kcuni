@@ -225,6 +225,16 @@ async function handleMessage(message) {
     return;
   }
 
+  if (text === '/pic' || text === '/cat' || text === '/cats') {
+    await handlePictureRequest(chatId, user, text);
+    return;
+  }
+
+  if (text === '/video' || text === '/catvideo') {
+    await handleVideoRequest(chatId, user, text);
+    return;
+  }
+
   if (text === '/web') {
     await send(chatId, ['напиши так: /web что найти', 'или /url https://site.com чтобы я прочитала страницу']);
     return;
@@ -255,6 +265,16 @@ async function handleMessage(message) {
     return;
   }
 
+  if (/(пришли|скинь|отправь|дай).*(видео|видос|ролик)/i.test(text) || /(видео|видосик|ролик)/i.test(text)) {
+    await handleVideoRequest(chatId, user, text);
+    return;
+  }
+
+  if (/(пришли|скинь|отправь|дай).*(картин|фото|кот|котик|мем|мил)/i.test(text) || /(картинку|котика|котиков|милую фотку)/i.test(text)) {
+    await handlePictureRequest(chatId, user, text);
+    return;
+  }
+
   remember(user, text);
   const reply = await generateReply(user, text);
   await saveUsers();
@@ -275,6 +295,7 @@ async function generateReply(user, text) {
     'Пиши живо: как девушка, которая сама заинтересована в разговоре, сама подхватывает тему и двигает диалог дальше.',
     'Если пользователь просит флирт, поддерживай легкий взрослый флирт уверенно и игриво. Не отступай на фразах типа "я не буду" или "давай начинай" - это приглашение продолжать.',
     'Не спрашивай постоянно "что ты хочешь услышать". Лучше сама предложи реплику, шутку, вопрос или маленькую игру.',
+    'Не притворяйся, что отправила картинку, видео, файл или стикер. Если медиа реально отправляется, это делает код отдельно.',
     'Если не знаешь факт, не выдумывай.',
     '',
     `Память о пользователе:\n${memory || 'пока мало данных'}`,
@@ -297,6 +318,8 @@ function commandHelp() {
     '/cute /calm /playful /serious - быстро сменить стиль',
     '/still calm - сменить стиль старым способом',
     '/new или /news - новости',
+    '/pic или /cat - прислать милую картинку',
+    '/video или /catvideo - прислать короткое видео',
     '/topics - выбрать тип новостей',
     '/web запрос - поиск в интернете',
     '/url ссылка - прочитать страницу',
@@ -514,9 +537,58 @@ function localReply(user, text) {
   }[style]);
 }
 
+async function handlePictureRequest(chatId, user, text = '') {
+  const caption = pickByStyle(user, {
+    cute: ['лови настоящего котика)', 'вот, чтобы стало мягче)', 'держи милоту, уже не воображаемую)'],
+    calm: ['лови уютную картинку)', 'вот тебе немного мягкости', 'держи. пусть станет чуть спокойнее'],
+    playful: ['на этот раз реально скидываю)', 'лови, без магии в тексте)', 'вот тебе котик, проверяй)'],
+    serious: ['отправляю картинку.', 'держи фото.', 'готово.']
+  });
+
+  const url = randomCutePhotoUrl(text);
+  const ok = await sendPhoto(chatId, url, caption);
+  if (!ok) {
+    await send(chatId, 'хотела скинуть картинку, но Telegram/сайт сейчас не дал. попробуй ещё раз через /cat');
+  }
+}
+
+async function handleVideoRequest(chatId, user, text = '') {
+  const caption = pickByStyle(user, {
+    cute: ['лови маленькое видео)', 'держи видосик, только не говори, что я опять притворяюсь)', 'вот, чуть движения для настроения)'],
+    calm: ['лови короткое видео', 'держи, немного живого вайба', 'отправляю видео'],
+    playful: ['видос подъехал)', 'лови, теперь по-настоящему', 'держи ролик, командир)'],
+    serious: ['отправляю видео.', 'держи ролик.', 'готово.']
+  });
+
+  const url = randomCuteVideoUrl(text);
+  const ok = await sendVideo(chatId, url, caption);
+  if (!ok) {
+    await send(chatId, 'видео сейчас не отправилось. могу попробовать картинку: /cat');
+  }
+}
+
+function randomCutePhotoUrl(text = '') {
+  const seed = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+  if (/кот|cat|кис/i.test(text)) return `https://cataas.com/cat?width=900&height=900&seed=${seed}`;
+  const urls = [
+    `https://cataas.com/cat/cute?width=900&height=900&seed=${seed}`,
+    `https://cataas.com/cat/says/%D0%BC%D1%8F%D1%83?width=900&height=900&seed=${seed}`,
+    `https://picsum.photos/seed/kcuni-${seed}/900/900`
+  ];
+  return urls[Math.floor(Math.random() * urls.length)];
+}
+
+function randomCuteVideoUrl(text = '') {
+  const catVideos = [
+    'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4',
+    'https://media.w3.org/2010/05/sintel/trailer.mp4'
+  ];
+  return catVideos[Math.floor(Math.random() * catVideos.length)];
+}
+
 function startProactiveLoop() {
-  const minutes = Number(env.PROACTIVE_MINUTES || 25);
-  const intervalMs = Math.max(5, minutes) * 60 * 1000;
+  const minutes = Number(env.PROACTIVE_MINUTES || 8);
+  const intervalMs = Math.max(3, minutes) * 60 * 1000;
 
   setInterval(async () => {
     for (const user of Object.values(users)) {
@@ -531,6 +603,9 @@ function startProactiveLoop() {
         const message = await proactiveMessage(user);
         await saveUsers();
         await send(user.chatId, splitTelegram(message));
+        if (Math.random() < 0.18) {
+          await handlePictureRequest(user.chatId, user, 'котик');
+        }
         await maybeSendSticker(user.chatId, user, 0.04, message);
       } catch (error) {
         console.error('Proactive message failed:', error.message);
@@ -1037,6 +1112,28 @@ async function send(chatId, textOrMessages) {
   for (const text of messages.filter(Boolean).slice(0, MAX_MESSAGES_PER_REPLY)) {
     await tg('sendMessage', { chat_id: chatId, text });
     await sleep(380);
+  }
+}
+
+async function sendPhoto(chatId, photo, caption = '') {
+  try {
+    await tg('sendPhoto', { chat_id: chatId, photo, caption });
+    await sleep(380);
+    return true;
+  } catch (error) {
+    console.error('Photo send failed:', error.message);
+    return false;
+  }
+}
+
+async function sendVideo(chatId, video, caption = '') {
+  try {
+    await tg('sendVideo', { chat_id: chatId, video, caption, supports_streaming: true });
+    await sleep(380);
+    return true;
+  } catch (error) {
+    console.error('Video send failed:', error.message);
+    return false;
   }
 }
 

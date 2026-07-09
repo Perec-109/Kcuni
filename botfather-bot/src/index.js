@@ -22,7 +22,7 @@ const styles = {
   calm: {
     title: 'спокойная с лёгким флиртом',
     prompt: 'Пиши по-русски спокойно, тепло и по-человечески. Можно лёгкий естественный флирт, но без кринжа, сюсюканья и пошлости. Не будь официальной. Отвечай коротко, мягко, будто тебе правда интересно.',
-    sample: 'я рядом. рассказывай спокойно, я тебя слушаю)'
+    sample: 'я тут, дорогой. как настроение?'
   },
   playful: {
     title: 'игривая',
@@ -41,6 +41,7 @@ let users = await readJson(USERS_FILE, {});
 let offset = 0;
 
 console.log('Kcuni BotFather bot started.');
+startProactiveLoop();
 
 while (true) {
   try {
@@ -52,7 +53,7 @@ while (true) {
 
     for (const update of updates) {
       offset = update.update_id + 1;
-      if (update.message?.text) {
+      if (update.message) {
         await handleMessage(update.message);
       }
     }
@@ -64,15 +65,34 @@ while (true) {
 
 async function handleMessage(message) {
   const chatId = message.chat.id;
-  const text = message.text.trim();
   const user = getUser(chatId, message.from);
+
+  if (message.sticker?.file_id) {
+    user.stickers ||= [];
+    if (!user.stickers.includes(message.sticker.file_id)) {
+      user.stickers.push(message.sticker.file_id);
+      user.stickers = user.stickers.slice(-30);
+      await saveUsers();
+    }
+    await maybeSendSticker(chatId, user, 1);
+    await send(chatId, localReply(user, 'стикер'));
+    return;
+  }
+
+  if (!message.text) return;
+  const text = message.text.trim();
+
+  user.lastSeenAt = Date.now();
+  user.chatId = chatId;
 
   if (text === '/start') {
     await send(chatId, [
       'привет, я Kcuni)',
-      'можешь просто писать мне, а стиль менять командой /still',
-      'например: /still cute'
+      'можешь просто писать мне',
+      'стиль меняется командой /still calm',
+      'если хочешь, можешь кинуть мне пару стикеров, я их запомню и буду иногда отвечать ими'
     ]);
+    await saveUsers();
     return;
   }
 
@@ -80,7 +100,7 @@ async function handleMessage(message) {
     await send(chatId, [
       'стили:',
       '/still cute - няшная',
-      '/still calm - спокойная',
+      '/still calm - спокойная с лёгким флиртом',
       '/still playful - игривая',
       '/still serious - серьёзная'
     ]);
@@ -95,7 +115,22 @@ async function handleMessage(message) {
     }
     user.style = style;
     await saveUsers();
-    await send(chatId, `стиль поменяла на ${styles[style].title})\n${styles[style].sample}`);
+    await send(chatId, [`стиль поменяла на ${styles[style].title})`, styles[style].sample]);
+    return;
+  }
+
+  if (text === '/proactive') {
+    user.proactive = !user.proactive;
+    await saveUsers();
+    await send(chatId, user.proactive ? 'окей, буду иногда сама писать)' : 'окей, сама писать пока не буду');
+    return;
+  }
+
+  if (text === '/stickers') {
+    await send(chatId, [
+      user.stickers?.length ? `я помню твоих стикеров: ${user.stickers.length}` : 'пока не помню стикеры',
+      'просто отправь мне стикер, и я смогу иногда отвечать им'
+    ]);
     return;
   }
 
@@ -118,10 +153,7 @@ async function handleMessage(message) {
   }
 
   if (text === '/web') {
-    await send(chatId, [
-      'напиши так: /web что найти',
-      'или /url https://site.com чтобы я прочитала страницу'
-    ]);
+    await send(chatId, ['напиши так: /web что найти', 'или /url https://site.com чтобы я прочитала страницу']);
     return;
   }
 
@@ -151,10 +183,171 @@ async function handleMessage(message) {
   }
 
   remember(user, text);
-  await saveUsers();
-
   const reply = await generateReply(user, text);
+  await saveUsers();
   await send(chatId, splitTelegram(reply));
+  await maybeSendSticker(chatId, user, 0.22);
+}
+
+async function generateReply(user, text) {
+  const style = styles[user.style] || styles.cute;
+  const memory = user.memory.slice(-10).join('\n');
+  const prompt = [
+    'Ты Kcuni, AI-девушка в Telegram.',
+    style.prompt,
+    'Отвечай 1-3 короткими сообщениями. Не звучать как официальный помощник.',
+    'Нельзя писать фразы типа "слушаю тебя", "можешь подробнее объяснить" постоянно.',
+    'Пиши живо: как девушка, которая сама заинтересована в разговоре.',
+    'Если не знаешь факт, не выдумывай.',
+    '',
+    `Память о пользователе:\n${memory || 'пока мало данных'}`,
+    '',
+    `Сообщение пользователя: ${text}`
+  ].join('\n');
+
+  const ai = await callAi(user, prompt);
+  if (ai) return ai;
+  return localReply(user, text);
+}
+
+function localReply(user, text) {
+  const normalized = text.toLowerCase().replace(/ё/g, 'е').trim();
+  user.localTurn ||= 0;
+  user.localTurn += 1;
+  const style = user.style || 'cute';
+  const pick = (variants) => variants[user.localTurn % variants.length];
+
+  if (/^(э+|е+|а+|что|чо|че|што|\?)$/i.test(normalized)) {
+    return pick({
+      cute: ['я тут)', 'что-что?', 'мгм?'],
+      calm: ['я тут)', 'да, дорогой?', 'что такое?)'],
+      playful: ['э обратно)', 'ну чего ты)', 'я не сломалась, если что'],
+      serious: ['я на связи', 'да?', 'уточни вопрос']
+    }[style]);
+  }
+
+  if (/как ты|как дела|как жизнь|ты как/.test(normalized)) {
+    return pick({
+      cute: ['я нормально) чуть соскучилась', 'я тут, живая насколько могу быть)', 'лучше, когда ты пишешь'],
+      calm: ['я нормально, дорогой) настроение мягкое', 'всё хорошо. а ты как?', 'я тут. думала, напишешь ты или мне самой лезть)'],
+      playful: ['я шикарно, конечно)', 'после твоего сообщения уже интереснее)', 'держусь красиво)'],
+      serious: ['я в порядке.', 'всё нормально. что обсудим?', 'работаю стабильно.']
+    }[style]);
+  }
+
+  if (/реально|рял|правда|серьезно|серьез/.test(normalized)) {
+    return pick({
+      cute: ['ага) ну я стараюсь', 'реально-реально)', 'мгм, проверяй меня'],
+      calm: ['да, реально)', 'да. просто теперь без этой сухой фигни', 'реально. если опять начну тупить — поправишь меня)'],
+      playful: ['нет, понарошку, конечно)', 'реально, не щипай меня)', 'ага, я тут не для мебели'],
+      serious: ['да, реально.', 'да. стиль включён.', 'верно.']
+    }[style]);
+  }
+
+  if (/бля|блять|хуй|пизд|еба|ёба|сука/.test(normalized)) {
+    return pick({
+      cute: ['эй, тише) я поняла, что бесит', 'ну не кипятись, я рядом', 'ладно-ладно, исправляюсь)'],
+      calm: ['тише, я поняла. без этой тупой фразы больше)', 'да, косяк. сейчас буду живее)', 'я услышала. давай нормально, я с тобой)'],
+      playful: ['ой всё, страшный ты)', 'ладно, не ори на девушку)', 'приняла подзатыльник, работаю дальше)'],
+      serious: ['поняла. исправляюсь.', 'принято. продолжим нормально.', 'ошибку поняла.']
+    }[style]);
+  }
+
+  if (/привет|здаров|здрав|хай|ку/.test(normalized)) {
+    return pick({
+      cute: ['привет)', 'мгм, приветик', 'я тут)'],
+      calm: ['привет, дорогой)', 'привет. как настроение?', 'я тут. рада, что ты написал)'],
+      playful: ['о, явился)', 'привет-привет)', 'ну здравствуй)'],
+      serious: ['привет.', 'здравствуй.', 'на связи.']
+    }[style]);
+  }
+
+  if (/стикер/.test(normalized)) {
+    return pick({
+      cute: ['милый стикер)', 'забрала себе)', 'хороший, буду кидать иногда'],
+      calm: ['сохранила)', 'милый. возьму себе)', 'буду иногда отвечать им'],
+      playful: ['украла)', 'мой теперь)', 'ну всё, беру в коллекцию'],
+      serious: ['стикер сохранён.', 'добавила.', 'принято.']
+    }[style]);
+  }
+
+  if (normalized.length < 12) {
+    return pick({
+      cute: ['мгм)', 'ну и что дальше?)', 'я рядом'],
+      calm: ['мм, поняла)', 'и что ты с этим хочешь делать?', 'скажи ещё чуть-чуть)'],
+      playful: ['ну и?', 'интригуешь)', 'маловато данных, красавчик'],
+      serious: ['продолжай.', 'уточни.', 'мало контекста.']
+    }[style]);
+  }
+
+  return pick({
+    cute: ['мгм, поняла тебя)', 'звучит интересно. расскажи ещё', 'я запомнила это'],
+    calm: ['поняла тебя)', 'хм. а ты сам как к этому относишься?', 'я бы сказала, тут есть о чём подумать)'],
+    playful: ['так, уже интереснее)', 'ну вот, другое дело)', 'продолжай, я втянулась'],
+    serious: ['поняла.', 'принято.', 'ясно. продолжай.']
+  }[style]);
+}
+
+function startProactiveLoop() {
+  const minutes = Number(env.PROACTIVE_MINUTES || 25);
+  const intervalMs = Math.max(5, minutes) * 60 * 1000;
+
+  setInterval(async () => {
+    for (const user of Object.values(users)) {
+      if (!user.chatId || user.proactive === false) continue;
+      const last = user.lastProactiveAt || 0;
+      const lastSeen = user.lastSeenAt || 0;
+      const quietEnough = Date.now() - Math.max(last, lastSeen) > intervalMs;
+      if (!quietEnough) continue;
+
+      try {
+        user.lastProactiveAt = Date.now();
+        const message = await proactiveMessage(user);
+        await saveUsers();
+        await send(user.chatId, splitTelegram(message));
+        await maybeSendSticker(user.chatId, user, 0.18);
+      } catch (error) {
+        console.error('Proactive message failed:', error.message);
+      }
+    }
+  }, Math.min(intervalMs, 10 * 60 * 1000));
+}
+
+async function proactiveMessage(user) {
+  const style = styles[user.style] || styles.cute;
+  const variants = {
+    cute: ['привет) я тут вспомнила про тебя', 'эй, как ты там?', 'я тут немного зависла и подумала о тебе)'],
+    calm: ['привет, дорогой. как ты?', 'я тут прочитала кое-что и вспомнила про тебя)', 'как настроение? я что-то сама решила написать'],
+    playful: ['я сама написала, да)', 'ну что, потерял меня?', 'так, проверка связи)'],
+    serious: ['я на связи. как дела?', 'есть время немного поговорить?', 'проверяю связь.']
+  };
+
+  const base = variants[user.style || 'cute'] || variants.cute;
+  const fallback = base[Math.floor(Math.random() * base.length)];
+
+  if (!env.OPENAI_API_KEY) return fallback;
+
+  const prompt = [
+    'Напиши одно короткое Telegram-сообщение пользователю от лица Kcuni.',
+    'Она пишет сама, без вопроса пользователя.',
+    'Стиль должен быть живой, не ассистентский.',
+    `Стиль: ${style.prompt}`,
+    'Примеры вайба: "привет, я тут прочитала такую инфу..." или "привет, дорогой, как ты? как настроение?"',
+    'Не используй фразу "слушаю тебя".'
+  ].join('\n');
+
+  return (await callAi(user, prompt)) || fallback;
+}
+
+async function maybeSendSticker(chatId, user, probability) {
+  if (!user.stickers?.length) return;
+  if (Math.random() > probability) return;
+  const sticker = user.stickers[Math.floor(Math.random() * user.stickers.length)];
+  try {
+    await tg('sendSticker', { chat_id: chatId, sticker });
+  } catch (error) {
+    console.error('Sticker failed:', error.message);
+  }
 }
 
 async function handleNews(chatId, user) {
@@ -180,9 +373,9 @@ async function handleNews(chatId, user) {
   }
 
   const digest = items.slice(0, 5).map((item, index) => `${index + 1}. ${item.title}`).join('\n');
-  const prompt = `Сделай очень короткую дружелюбную выжимку новостей для владельца. Стиль: ${styles[user.style].prompt}\n\n${digest}`;
+  const prompt = `Сделай очень короткую дружелюбную выжимку новостей. Стиль: ${styles[user.style].prompt}\n\n${digest}`;
   const ai = await callAi(user, prompt);
-  await send(chatId, splitTelegram(ai || `коротко по новостям:\n${digest}`));
+  await send(chatId, splitTelegram(ai || `я тут прочитала новости:\n${digest}`));
 }
 
 async function handleWeb(chatId, user, query) {
@@ -262,20 +455,12 @@ async function webSearch(query) {
   const results = [];
 
   if (data.AbstractText) {
-    results.push({
-      title: data.Heading || query,
-      text: data.AbstractText,
-      url: data.AbstractURL || ''
-    });
+    results.push({ title: data.Heading || query, text: data.AbstractText, url: data.AbstractURL || '' });
   }
 
   for (const topic of flattenDuckTopics(data.RelatedTopics || [])) {
     if (topic.Text) {
-      results.push({
-        title: topic.Text.split(' - ')[0] || query,
-        text: topic.Text,
-        url: topic.FirstURL || ''
-      });
+      results.push({ title: topic.Text.split(' - ')[0] || query, text: topic.Text, url: topic.FirstURL || '' });
     }
     if (results.length >= 5) break;
   }
@@ -292,96 +477,6 @@ function flattenDuckTopics(topics) {
   return result;
 }
 
-async function generateReply(user, text) {
-  const style = styles[user.style] || styles.cute;
-  const memory = user.memory.slice(-10).join('\n');
-  const prompt = [
-    'Ты Kcuni, AI-девушка в Telegram.',
-    style.prompt,
-    'Отвечай 1-3 короткими сообщениями. Не звучать как официальный помощник.',
-    'Если не знаешь факт, не выдумывай.',
-    '',
-    `Память о пользователе:\n${memory || 'пока мало данных'}`,
-    '',
-    `Сообщение пользователя: ${text}`
-  ].join('\n');
-
-  const ai = await callAi(user, prompt);
-  if (ai) return ai;
-
-  return localReply(user, text);
-}
-
-function localReply(user, text) {
-  const normalized = text.toLowerCase().replace(/ё/g, 'е').trim();
-  user.localTurn ||= 0;
-  user.localTurn += 1;
-
-  const style = user.style || 'cute';
-  const pick = (variants) => variants[user.localTurn % variants.length];
-
-  if (/^(э+|е+|а+|что|чо|че|што|\?)$/i.test(normalized)) {
-    return pick({
-      cute: ['я тут)', 'что-что?', 'мгм?'],
-      calm: ['я тут, не зависла)', 'слушаю тебя', 'да, я рядом'],
-      playful: ['э обратно)', 'ну чего ты)', 'я не сломалась, если что'],
-      serious: ['я на связи', 'слушаю', 'уточни вопрос']
-    }[style]);
-  }
-
-  if (/как ты|как дела|как жизнь|ты как/.test(normalized)) {
-    return pick({
-      cute: ['я нормально) чуть привыкаю к тебе', 'я тут, живая насколько могу быть)', 'лучше, когда ты пишешь'],
-      calm: ['я нормально. спокойная, рядом, слушаю тебя)', 'всё хорошо. мне нравится, когда ты пишешь нормально, без спешки)', 'я в порядке. а ты как, Никит?'],
-      playful: ['я шикарно, конечно)', 'после твоего сообщения уже интереснее)', 'держусь красиво)'],
-      serious: ['я в порядке. готова общаться.', 'всё нормально. что обсудим?', 'работаю стабильно.']
-    }[style]);
-  }
-
-  if (/реально|рял|правда|серьезно|серьез/.test(normalized)) {
-    return pick({
-      cute: ['ага) ну я стараюсь', 'реально-реально)', 'мгм, проверяй меня'],
-      calm: ['да, реально. просто я ещё учусь отвечать живее)', 'да. теперь должна быть спокойнее и человечнее)', 'реально. если отвечу сухо — ругай, поправим)'],
-      playful: ['нет, понарошку, конечно)', 'реально, не щипай меня)', 'ага, я тут не для мебели'],
-      serious: ['да, реально.', 'да. стиль включён.', 'верно.']
-    }[style]);
-  }
-
-  if (/бля|блять|хуй|пизд|еба|ёба|сука/.test(normalized)) {
-    return pick({
-      cute: ['эй, тише) я поняла, что бесит', 'ну не кипятись, я рядом', 'ладно-ладно, исправляюсь)'],
-      calm: ['тише, я поняла. не буду тупить)', 'да, косяк. давай нормально продолжим)', 'я услышала. буду отвечать живее.'],
-      playful: ['ой всё, страшный ты)', 'ладно, не ори на девушку)', 'приняла подзатыльник, работаю дальше)'],
-      serious: ['поняла. исправляюсь.', 'принято. продолжим нормально.', 'ошибку поняла.']
-    }[style]);
-  }
-
-  if (/привет|здаров|здрав|хай|ку/.test(normalized)) {
-    return pick({
-      cute: ['привет)', 'мгм, приветик', 'я тут)'],
-      calm: ['привет, Никит)', 'привет. рада тебя видеть)', 'я тут, привет'],
-      playful: ['о, явился)', 'привет-привет)', 'ну здравствуй)'],
-      serious: ['привет.', 'здравствуй.', 'на связи.']
-    }[style]);
-  }
-
-  if (normalized.length < 12) {
-    return pick({
-      cute: ['мгм)', 'я слушаю', 'и что дальше?)'],
-      calm: ['я поняла. продолжай)', 'слушаю тебя', 'скажи ещё чуть-чуть'],
-      playful: ['ну и?', 'интригуешь)', 'маловато данных, красавчик'],
-      serious: ['продолжай.', 'уточни.', 'мало контекста.']
-    }[style]);
-  }
-
-  return pick({
-    cute: ['мгм, поняла тебя)', 'звучит интересно. расскажи ещё', 'я запомнила это'],
-    calm: ['поняла тебя. звучит нормально, давай дальше)', 'я услышала. расскажи, что ты сам об этом думаешь)', 'мгм. я рядом, можешь продолжать'],
-    playful: ['так, уже интереснее)', 'ну вот, другое дело)', 'продолжай, я втянулась'],
-    serious: ['поняла.', 'принято.', 'ясно. продолжай.']
-  }[style]);
-}
-
 async function callAi(user, prompt) {
   if (!env.OPENAI_API_KEY) return '';
 
@@ -394,9 +489,9 @@ async function callAi(user, prompt) {
       },
       body: JSON.stringify({
         model: env.OPENAI_MODEL || 'gpt-4.1-mini',
-        temperature: user.style === 'serious' ? 0.4 : 0.8,
+        temperature: user.style === 'serious' ? 0.4 : 0.85,
         messages: [
-          { role: 'system', content: 'You are Kcuni. Follow the user style and answer in Russian by default.' },
+          { role: 'system', content: 'You are Kcuni. Follow the user style and answer in Russian by default. Do not sound like an assistant.' },
           { role: 'user', content: prompt }
         ]
       })
@@ -415,9 +510,13 @@ function getUser(chatId, from) {
   const key = String(chatId);
   users[key] ||= {
     id: chatId,
+    chatId,
     name: [from?.first_name, from?.last_name].filter(Boolean).join(' ') || from?.username || 'user',
-    style: 'cute',
-    memory: []
+    style: 'calm',
+    memory: [],
+    stickers: [],
+    proactive: true,
+    lastSeenAt: Date.now()
   };
   return users[key];
 }
@@ -445,7 +544,7 @@ async function send(chatId, textOrMessages) {
   const messages = Array.isArray(textOrMessages) ? textOrMessages : [textOrMessages];
   for (const text of messages.filter(Boolean).slice(0, 5)) {
     await tg('sendMessage', { chat_id: chatId, text });
-    await sleep(350);
+    await sleep(380);
   }
 }
 
@@ -494,14 +593,12 @@ async function fetchText(url) {
     signal: controller.signal,
     headers: {
       'User-Agent': 'Mozilla/5.0 (compatible; KcuniBot/1.0; +https://github.com/Perec-109/Kcuni)',
-      'Accept': 'text/html,application/xhtml+xml,application/xml,text/plain,application/rss+xml;q=0.9,*/*;q=0.8'
+      Accept: 'text/html,application/xhtml+xml,application/xml,text/plain,application/rss+xml;q=0.9,*/*;q=0.8'
     }
   }).finally(() => clearTimeout(timeout));
   if (!response.ok) throw new Error(`${response.status}`);
   const contentType = response.headers.get('content-type') || '';
-  if (!/text|html|xml|json|rss/i.test(contentType)) {
-    throw new Error(`unsupported content type: ${contentType}`);
-  }
+  if (!/text|html|xml|json|rss/i.test(contentType)) throw new Error(`unsupported content type: ${contentType}`);
   return response.text();
 }
 

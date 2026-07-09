@@ -520,7 +520,7 @@ async function proactiveMessage(user) {
   const base = variants[user.style || 'cute'] || variants.cute;
   const fallback = base[Math.floor(Math.random() * base.length)];
 
-  if (!env.OPENAI_API_KEY) return fallback;
+  if (!hasAnyAiKey()) return fallback;
 
   const prompt = [
     'Напиши одно короткое Telegram-сообщение пользователю от лица Kcuni.',
@@ -808,9 +808,65 @@ function flattenDuckTopics(topics) {
   return result;
 }
 
-async function callAi(user, prompt) {
-  if (!env.OPENAI_API_KEY) return '';
+function hasAnyAiKey() {
+  return Boolean(env.GEMINI_API_KEY || env.OPENAI_API_KEY);
+}
 
+async function callAi(user, prompt) {
+  const provider = (env.AI_PROVIDER || (env.GEMINI_API_KEY ? 'gemini' : 'openai')).toLowerCase();
+
+  if (provider === 'gemini' && env.GEMINI_API_KEY) {
+    const gemini = await callGemini(user, prompt);
+    if (gemini) return gemini;
+  }
+
+  if (provider === 'openai' && env.OPENAI_API_KEY) {
+    const openai = await callOpenAi(user, prompt);
+    if (openai) return openai;
+  }
+
+  if (provider !== 'gemini' && env.GEMINI_API_KEY) {
+    const gemini = await callGemini(user, prompt);
+    if (gemini) return gemini;
+  }
+
+  if (provider !== 'openai' && env.OPENAI_API_KEY) {
+    const openai = await callOpenAi(user, prompt);
+    if (openai) return openai;
+  }
+
+  return '';
+}
+
+async function callGemini(user, prompt) {
+  try {
+    const model = env.GEMINI_MODEL || 'gemini-1.5-flash';
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: {
+          parts: [{ text: 'Ты Kcuni. Отвечай по-русски живо, коротко, не как официальный помощник. Держи стиль пользователя. Не морализируй без причины.' }]
+        },
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: user.style === 'serious' ? 0.4 : 0.85,
+          maxOutputTokens: 700
+        }
+      })
+    });
+
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    const data = await response.json();
+    return data.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
+  } catch (error) {
+    console.error('Gemini error:', error.message);
+    return '';
+  }
+}
+
+async function callOpenAi(user, prompt) {
   try {
     const response = await fetch(`${env.OPENAI_BASE_URL || 'https://api.openai.com/v1'}/chat/completions`, {
       method: 'POST',
@@ -832,7 +888,7 @@ async function callAi(user, prompt) {
     const data = await response.json();
     return data.choices?.[0]?.message?.content?.trim() || '';
   } catch (error) {
-    console.error('AI error:', error.message);
+    console.error('OpenAI error:', error.message);
     return '';
   }
 }

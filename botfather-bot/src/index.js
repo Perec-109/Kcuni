@@ -117,6 +117,16 @@ async function handleMessage(message) {
     return;
   }
 
+  if (text === '/web') {
+    await send(chatId, 'напиши так: /web что найти');
+    return;
+  }
+
+  if (text.startsWith('/web ')) {
+    await handleWeb(chatId, user, text.slice(5).trim());
+    return;
+  }
+
   remember(user, text);
   await saveUsers();
 
@@ -150,6 +160,78 @@ async function handleNews(chatId, user) {
   const prompt = `Сделай очень короткую дружелюбную выжимку новостей для владельца. Стиль: ${styles[user.style].prompt}\n\n${digest}`;
   const ai = await callAi(user, prompt);
   await send(chatId, splitTelegram(ai || `коротко по новостям:\n${digest}`));
+}
+
+async function handleWeb(chatId, user, query) {
+  if (!query) {
+    await send(chatId, 'напиши так: /web что найти');
+    return;
+  }
+
+  try {
+    const result = await webSearch(query);
+    if (!result.length) {
+      await send(chatId, 'я поискала, но нормального ответа не нашла');
+      return;
+    }
+
+    const facts = result.map((item, index) => `${index + 1}. ${item.title}${item.text ? ` - ${item.text}` : ''}`).join('\n');
+    const prompt = [
+      `Запрос: ${query}`,
+      'Сделай короткий человеческий ответ по найденной информации.',
+      `Стиль: ${styles[user.style].prompt}`,
+      'Не выдумывай. Если данные слабые, скажи об этом.',
+      '',
+      facts
+    ].join('\n');
+
+    const ai = await callAi(user, prompt);
+    await send(chatId, splitTelegram(ai || `нашла вот что:\n${facts}`));
+  } catch (error) {
+    console.error('Web search error:', error.message);
+    await send(chatId, 'сейчас не смогла выйти в сеть нормально');
+  }
+}
+
+async function webSearch(query) {
+  const url = new URL('https://api.duckduckgo.com/');
+  url.searchParams.set('q', query);
+  url.searchParams.set('format', 'json');
+  url.searchParams.set('no_html', '1');
+  url.searchParams.set('skip_disambig', '1');
+
+  const data = JSON.parse(await fetchText(url.toString()));
+  const results = [];
+
+  if (data.AbstractText) {
+    results.push({
+      title: data.Heading || query,
+      text: data.AbstractText,
+      url: data.AbstractURL || ''
+    });
+  }
+
+  for (const topic of flattenDuckTopics(data.RelatedTopics || [])) {
+    if (topic.Text) {
+      results.push({
+        title: topic.Text.split(' - ')[0] || query,
+        text: topic.Text,
+        url: topic.FirstURL || ''
+      });
+    }
+    if (results.length >= 5) break;
+  }
+
+  return results;
+}
+
+function flattenDuckTopics(topics) {
+  const result = [];
+  for (const item of topics) {
+    if (item.Topics) result.push(...flattenDuckTopics(item.Topics));
+    else result.push(item);
+  }
+  return result;
 }
 
 async function generateReply(user, text) {

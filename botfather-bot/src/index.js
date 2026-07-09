@@ -840,7 +840,7 @@ async function callAi(user, prompt) {
 
 async function callGemini(user, prompt) {
   try {
-    const model = env.GEMINI_MODEL || 'gemini-1.5-flash';
+    const model = env.GEMINI_MODEL || 'gemini-flash-lite-latest';
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
     const response = await fetch(url, {
       method: 'POST',

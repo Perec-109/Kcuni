@@ -45,12 +45,16 @@ npm start
 ## Команды
 
 - `/start` - приветствие
+- `/help` - список команд
 - `/still` - показать стили
 - `/still cute` - няшная
 - `/still calm` - спокойная
 - `/still playful` - игривая/дерзкая
 - `/still serious` - серьёзная
+- `/cute`, `/calm`, `/playful`, `/serious` - быстро переключить стиль
 - `/news` - короткая выжимка новостей
+- `/new` - то же самое, короткая команда
+- `/topics` - выбрать тип новостей
 - `/web запрос` - поиск информации в интернете
 - `/search запрос` - то же самое, явная команда поиска
 - `/url https://site.com/page` - открыть и кратко пересказать конкретную страницу
@@ -80,6 +84,44 @@ MAX_MESSAGES_PER_REPLY=2
 ```
 
 Команда `/proactive` включает или выключает это для конкретного чата.
+
+Kcuni может сама приносить новости без `/news`: примерно раз в заданный интервал она пробует найти что-то из выбранной
+темы и пишет естественно, не как новостной бот.
+
+Темы новостей:
+
+```text
+/topics interesting
+/topics sad
+/topics war
+/topics tech
+/topics mixed
+```
+
+## Как сделать ответы реально умными
+
+Без `OPENAI_API_KEY` бот работает на локальных правилах. Это лучше, чем пустой бот, но это не настоящий разговорный AI.
+
+Чтобы она отвечала как нормальная ИИшка:
+
+1. Получи OpenAI-compatible API key.
+2. Вставь в `.env`:
+
+```env
+OPENAI_API_KEY=your_key_here
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4.1-mini
+OPENAI_VISION_MODEL=gpt-4.1-mini
+OPENAI_TRANSCRIBE_MODEL=whisper-1
+```
+
+3. Перезапусти:
+
+```bash
+npm start
+```
+
+Можно использовать не только OpenAI, а любой совместимый endpoint, если он поддерживает `/chat/completions`.
 
 ## Фото, голосовые и кружки
 

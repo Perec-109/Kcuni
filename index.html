@@ -24,10 +24,10 @@
       <div class="aura two"></div>
       <div class="hero-copy">
         <p class="eyebrow">AI character · Telegram · memory</p>
-        <h1>Kcuni - AI-девушка, которая живёт в Telegram</h1>
+        <h1>Kcuni - AI-девушка как обычный Telegram-бот</h1>
         <p class="lead">
-          Она отвечает в личке, поддерживает диалог, помнит важные вещи,
-          читает каналы с новостями и может сама написать, когда есть что сказать.
+          Работает через BotFather: отвечает в личке, помнит важные вещи,
+          меняет стиль командой `/still` и может присылать короткие новости.
         </p>
         <div class="actions">
           <a class="btn primary" href="#setup">Как запустить</a>
@@ -52,18 +52,18 @@
     <section class="cards reveal" id="telegram">
       <article>
         <span class="icon">01</span>
-        <h2>Не обычный бот</h2>
-        <p>Kcuni работает через TDLib как отдельный Telegram-аккаунт. Она видит лички, группы и каналы почти как живой пользователь.</p>
+        <h2>BotFather-версия</h2>
+        <p>Не нужен отдельный номер и отдельный Telegram-аккаунт. Создаёшь бота у @BotFather, вставляешь токен и запускаешь сервер.</p>
       </article>
       <article>
         <span class="icon">02</span>
         <h2>Сама поддерживает диалог</h2>
-        <p>Может отвечать короткими сообщениями, открывать чаты, вспоминать прошлые разговоры и не писать, если момент не подходит.</p>
+        <p>Может отвечать короткими сообщениями, вспоминать прошлые разговоры, менять тон и работать как личный AI-компаньон.</p>
       </article>
       <article>
         <span class="icon">03</span>
         <h2>Память через дневник</h2>
-        <p>Важные события, люди, обещания и новости сохраняются в дневник, чтобы потом всплывать в разговоре естественно.</p>
+        <p>Важные события, люди, обещания и новости сохраняются в память пользователя, чтобы потом всплывать в разговоре естественно.</p>
       </article>
     </section>
 
@@ -102,11 +102,11 @@
         </p>
       </div>
       <ol class="steps">
-        <li>Создай отдельный Telegram-аккаунт для Kcuni.</li>
-        <li>Подпиши его на нужные каналы.</li>
-        <li>Запусти C++ приложение с TDLib.</li>
+        <li>Создай бота через @BotFather и получи токен.</li>
+        <li>Вставь токен в `botfather-bot/.env`.</li>
+        <li>Запусти `npm install` и `npm start`.</li>
         <li>Напиши `/still cute` или другой стиль прямо в Telegram.</li>
-        <li>Kcuni читает каналы, пишет в дневник и отвечает в личке.</li>
+        <li>Kcuni отвечает, помнит и выдаёт новости по `/news`.</li>
       </ol>
     </section>
 
@@ -114,10 +114,10 @@
       <p class="eyebrow">Запуск</p>
       <h2>Что уже есть в проекте</h2>
       <div class="setup-grid">
-        <div><strong>TelegramClient</strong><span>логин через TDLib, чтение чатов, отправка сообщений</span></div>
-        <div><strong>OpenAI/Ollama</strong><span>LLM-ядро для ответов, размышлений и инструментов</span></div>
-        <div><strong>Diary</strong><span>память, события, люди, новости, эмоции</span></div>
-        <div><strong>Character config</strong><span>настройка личности и стиля общения</span></div>
+        <div><strong>BotFather bot</strong><span>обычный Telegram Bot API без отдельного номера</span></div>
+        <div><strong>/still</strong><span>смена стиля общения прямо с телефона</span></div>
+        <div><strong>Memory</strong><span>память по каждому пользователю в JSON</span></div>
+        <div><strong>/news</strong><span>короткая выжимка новостей из RSS/API</span></div>
       </div>
     </section>
   </main>

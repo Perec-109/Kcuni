@@ -1,0 +1,10 @@
+{
+  "name": "kcuni-botfather-bot",
+  "version": "1.0.0",
+  "description": "Kcuni Telegram Bot API version with style presets, memory and news digest.",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {}
+}

@@ -1383,7 +1383,10 @@ async function tg(method, payload) {
 
 async function send(chatId, textOrMessages) {
   const messages = Array.isArray(textOrMessages) ? textOrMessages : [textOrMessages];
-  for (const text of messages.filter(Boolean).slice(0, MAX_MESSAGES_PER_REPLY)) {
+  const prepared = messages.filter(Boolean).slice(0, MAX_MESSAGES_PER_REPLY);
+  for (let index = 0; index < prepared.length; index += 1) {
+    const text = prepared[index];
+    await humanTypingDelay(chatId, text, index);
     await tg('sendMessage', { chat_id: chatId, text });
     await sleep(380);
   }
@@ -1391,6 +1394,8 @@ async function send(chatId, textOrMessages) {
 
 async function sendPhoto(chatId, photo, caption = '') {
   try {
+    await showChatAction(chatId, 'upload_photo');
+    await sleep(1200 + Math.floor(Math.random() * 900));
     await tg('sendPhoto', { chat_id: chatId, photo, caption });
     await sleep(380);
     return true;
@@ -1402,6 +1407,8 @@ async function sendPhoto(chatId, photo, caption = '') {
 
 async function sendVideo(chatId, video, caption = '') {
   try {
+    await showChatAction(chatId, 'upload_video');
+    await sleep(1800 + Math.floor(Math.random() * 1400));
     await tg('sendVideo', { chat_id: chatId, video, caption, supports_streaming: true });
     await sleep(380);
     return true;
@@ -1409,6 +1416,45 @@ async function sendVideo(chatId, video, caption = '') {
     console.error('Video send failed:', error.message);
     return false;
   }
+}
+
+async function humanTypingDelay(chatId, text, messageIndex = 0) {
+  const delay = calculateTypingDelay(text, messageIndex);
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < delay) {
+    await showChatAction(chatId, 'typing');
+    await sleep(Math.min(4200, delay - (Date.now() - startedAt)));
+  }
+}
+
+function calculateTypingDelay(text, messageIndex = 0) {
+  const length = String(text).length;
+  const words = String(text).trim().split(/\s+/).filter(Boolean).length;
+  const base = Number(env.TYPING_BASE_MS || 1800);
+  const perChar = Number(env.TYPING_PER_CHAR_MS || 28);
+  const perWord = Number(env.TYPING_PER_WORD_MS || 120);
+  const jitter = Math.floor(Math.random() * 900);
+  const raw = base + length * perChar + words * perWord + jitter + messageIndex * 900;
+
+  const min = Number(env.TYPING_MIN_MS || 2000);
+  const max = Number(env.TYPING_MAX_MS || 10000);
+
+  if (length <= 18) return clamp(1400 + jitter, 1000, 2600);
+  if (length <= 55) return clamp(raw, min, 5200);
+  return clamp(raw, min, max);
+}
+
+async function showChatAction(chatId, action) {
+  try {
+    await tg('sendChatAction', { chat_id: chatId, action });
+  } catch (error) {
+    console.error('Chat action failed:', error.message);
+  }
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }
 
 function splitTelegram(text) {

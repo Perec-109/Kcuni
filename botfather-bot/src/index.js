@@ -175,6 +175,13 @@ async function handleMessage(message) {
     return;
   }
 
+  if (text === '/normal') {
+    user.teaseIgnoreUntil = 0;
+    await saveUsers();
+    await send(chatId, 'ладно, больше не игнорю)');
+    return;
+  }
+
   if (text === '/stickers') {
     await send(chatId, [
       user.stickers?.length ? `я помню твоих стикеров: ${user.stickers.length}` : 'пока не помню стикеры',
@@ -262,6 +269,15 @@ async function handleMessage(message) {
 
   if (text.startsWith('/url ')) {
     await handleUrl(chatId, user, text.slice(5).trim());
+    return;
+  }
+
+  if (await handleIgnoreRoleplay(chatId, user, text)) {
+    return;
+  }
+
+  if (user.teaseIgnoreUntil && Date.now() < user.teaseIgnoreUntil && !text.startsWith('/')) {
+    await maybeDelayTeaseReply(chatId, user, text);
     return;
   }
 
@@ -535,6 +551,71 @@ function localReply(user, text) {
     playful: ['так, уже интереснее)', 'ну вот, другое дело)', 'продолжай, я втянулась'],
     serious: ['поняла.', 'принято.', 'ясно. продолжай.']
   }[style]);
+}
+
+async function handleIgnoreRoleplay(chatId, user, text) {
+  const normalized = normalizeText(text);
+  if (!/(игнор|безразлич|равнодуш|не отвечай|ответь через|через \d+ минут|молчи)/.test(normalized)) {
+    return false;
+  }
+
+  const minutes = parseDelayMinutes(normalized) || 5;
+  const safeMinutes = Math.min(Math.max(minutes, 1), 20);
+  user.teaseIgnoreUntil = Date.now() + safeMinutes * 60 * 1000;
+  user.dialogue ||= {};
+  user.dialogue.mood = 'teaseIgnore';
+  await saveUsers();
+
+  setTimeout(async () => {
+    try {
+      if (!users[String(chatId)]?.teaseIgnoreUntil) return;
+      const reply = pickByStyle(user, {
+        cute: ['ну всё, я почти выдержала молчать) соскучился?', 'ладно, я вернулась. только не делай вид, что не ждал)', 'я пыталась быть холодной, но ты слишком мешаешь мне молчать)'],
+        calm: ['я выдержала паузу. как ты там, дорогой?', 'ладно, хватит делать вид, что мне всё равно)', 'я вернулась. признайся, успел проверить чат?'],
+        playful: ['пять минут ледяной королевы закончились)', 'ну что, скучал или будешь играть сильного?', 'я тебя игнорила, но красиво. зачёт мне?)'],
+        serious: ['пауза закончилась.', 'я снова на связи.', 'режим игнора закончился.']
+      });
+      user.teaseIgnoreUntil = 0;
+      await saveUsers();
+      await send(chatId, splitTelegram(reply));
+    } catch (error) {
+      console.error('Delayed tease failed:', error.message);
+    }
+  }, safeMinutes * 60 * 1000);
+
+  return true;
+}
+
+async function maybeDelayTeaseReply(chatId, user, text) {
+  if (Math.random() < 0.75) {
+    await saveUsers();
+    return;
+  }
+
+  const reply = pickByStyle(user, {
+    cute: ['я вообще-то тебя игнорю... но ладно, одним глазком увидела)', 'не мешай мне быть безразличной, у меня почти получалось)', 'молчу-молчу. почти)'],
+    calm: ['я сейчас типа холодная, помнишь?)', 'не провоцируй, я держу паузу', 'ещё чуть-чуть помолчу, как ты просил'],
+    playful: ['эй, не ломай мой образ безразличной девушки)', 'я в игноре, но ты мешаешь красиво', 'я не отвечаю. это, кстати, ответ'],
+    serious: ['пауза ещё идёт.', 'я отвечу позже.', 'режим игнора активен.']
+  });
+  await send(chatId, splitTelegram(reply));
+}
+
+function parseDelayMinutes(text) {
+  const digit = text.match(/(\d+)\s*(мин|м|min)/i);
+  if (digit) return Number(digit[1]);
+  const words = [
+    [/одн(у|а)|one/, 1],
+    [/две|два|two/, 2],
+    [/три|three/, 3],
+    [/четыре|four/, 4],
+    [/пять|пяти|five/, 5],
+    [/десять|ten/, 10]
+  ];
+  for (const [pattern, value] of words) {
+    if (pattern.test(text)) return value;
+  }
+  return 0;
 }
 
 async function handlePictureRequest(chatId, user, text = '') {

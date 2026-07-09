@@ -564,26 +564,46 @@ async function describeTelegramFile(user, fileId, kind, extraText) {
   const fileUrl = await getTelegramFileUrl(fileId);
 
   if (kind === 'photo') {
-    if (!env.OPENAI_API_KEY) {
-      return extraText
-        ? `вижу фотку.${extraText} но нормально рассмотреть смогу, когда подключишь AI-ключ с vision`
-        : 'вижу фотку) нормально описывать картинки смогу, когда подключишь AI-ключ с vision';
-    }
     const prompt = [
       'Опиши фото коротко, по-русски, живо, от лица Kcuni.',
       `Стиль: ${(styles[user.style] || styles.cute).prompt}`,
       extraText ? `Подпись пользователя:${extraText}` : ''
     ].join('\n');
-    return await callVision(user, prompt, fileUrl) || 'вижу фотку, но сейчас не смогла нормально разобрать';
+
+    if (env.GEMINI_API_KEY) {
+      return await callGeminiMedia(user, prompt, fileUrl, 'image/jpeg') || 'вижу фотку, но сейчас не смогла нормально разобрать';
+    }
+
+    if (env.OPENAI_API_KEY) {
+      return await callVision(user, prompt, fileUrl) || 'вижу фотку, но сейчас не смогла нормально разобрать';
+    }
+
+    return 'вижу фотку) нормально описывать картинки смогу, когда подключим AI-ключ';
   }
 
   if (kind === 'voice') {
-    if (!env.OPENAI_API_KEY) return 'я получила голосовое, но расшифровку надо подключить через AI-ключ';
-    return await transcribeTelegramAudio(user, fileUrl) || 'я получила голосовое, но не смогла его разобрать';
+    if (env.GEMINI_API_KEY) {
+      return await understandGeminiVoice(user, fileUrl) || 'я получила голосовое, но сейчас не смогла его разобрать';
+    }
+
+    if (env.OPENAI_API_KEY) {
+      return await transcribeTelegramAudio(user, fileUrl) || 'я получила голосовое, но не смогла его разобрать';
+    }
+
+    return 'я получила голосовое, но расшифровку надо подключить через AI-ключ';
   }
 
   if (kind === 'video_note') {
-    return 'вижу кружок) пока могу только заметить его, а нормально понимать видео надо подключать через vision/распознавание';
+    if (env.GEMINI_API_KEY) {
+      const prompt = [
+        'Пользователь отправил Telegram-кружок. Посмотри видео и ответь по-русски коротко, живо, от лица Kcuni.',
+        'Если есть речь, перескажи смысл и ответь на неё. Если речи нет, опиши что видно.',
+        `Стиль: ${(styles[user.style] || styles.cute).prompt}`
+      ].join('\n');
+      return await callGeminiMedia(user, prompt, fileUrl, 'video/mp4') || 'вижу кружок, но сейчас не смогла нормально разобрать видео';
+    }
+
+    return 'вижу кружок) нормально понимать видео смогу, когда подключим Gemini/vision';
   }
 
   return 'получила файл';
@@ -623,6 +643,56 @@ async function callVision(user, prompt, imageUrl) {
   }
 }
 
+async function understandGeminiVoice(user, fileUrl) {
+  const transcriptPrompt = [
+    'Это голосовое сообщение пользователя в Telegram.',
+    'Сначала мысленно расшифруй речь, потом ответь на неё как Kcuni.',
+    'Не пиши длинную стену. Ответь по-русски живо, 1-2 короткими сообщениями.',
+    `Стиль: ${(styles[user.style] || styles.cute).prompt}`
+  ].join('\n');
+
+  const reply = await callGeminiMedia(user, transcriptPrompt, fileUrl, 'audio/ogg');
+  if (reply) remember(user, `[voice understood] ${reply}`);
+  return reply;
+}
+
+async function callGeminiMedia(user, prompt, fileUrl, mimeType) {
+  try {
+    const mediaResponse = await fetch(fileUrl);
+    if (!mediaResponse.ok) throw new Error(`telegram file ${mediaResponse.status}`);
+    const buffer = Buffer.from(await mediaResponse.arrayBuffer());
+    const model = env.GEMINI_MEDIA_MODEL || env.GEMINI_MODEL || 'gemini-flash-lite-latest';
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: {
+          parts: [{ text: 'Ты Kcuni. Отвечай по-русски живо и коротко. Не звучать как официальный помощник.' }]
+        },
+        contents: [{
+          role: 'user',
+          parts: [
+            { text: prompt },
+            { inlineData: { mimeType, data: buffer.toString('base64') } }
+          ]
+        }],
+        generationConfig: {
+          temperature: user.style === 'serious' ? 0.35 : 0.75,
+          maxOutputTokens: 700
+        }
+      })
+    });
+
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    const data = await response.json();
+    return data.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
+  } catch (error) {
+    console.error('Gemini media error:', error.message);
+    return '';
+  }
+}
+
 async function transcribeTelegramAudio(user, fileUrl) {
   try {
     const audio = await fetch(fileUrl).then((r) => r.blob());
@@ -645,7 +715,6 @@ async function transcribeTelegramAudio(user, fileUrl) {
     return '';
   }
 }
-
 async function handleNews(chatId, user, topic = 'mixed') {
   const digest = await buildNewsDigest(user, topic, false);
   if (!digest) {

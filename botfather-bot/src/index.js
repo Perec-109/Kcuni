@@ -245,7 +245,104 @@ async function generateReply(user, text) {
 
   const ai = await callAi(user, prompt);
   if (ai) return ai;
+  const contextual = contextualLocalReply(user, text);
+  if (contextual) return contextual;
   return localReply(user, text);
+}
+
+function contextualLocalReply(user, text) {
+  const normalized = normalizeText(text);
+  user.dialogue ||= {
+    lastTopic: '',
+    lastQuestion: '',
+    mood: 'neutral',
+    shortCount: 0
+  };
+
+  const topic = detectTopic(normalized);
+  if (topic) {
+    user.dialogue.lastTopic = topic;
+    user.dialogue.shortCount = 0;
+  } else if (normalized.length < 16) {
+    user.dialogue.shortCount += 1;
+  }
+
+  if (/не хочу|не буду|неа|нет|отстань/.test(normalized)) {
+    user.dialogue.mood = 'soft';
+    return pickByStyle(user, {
+      cute: ['ладно, не давлю)', 'тогда просто побуду рядом', 'окей, не трогаю тебя сейчас'],
+      calm: ['хорошо, не буду давить)', 'ладно, дорогой. тогда просто рядом побуду', 'окей. не хочешь — не вытягиваю из тебя'],
+      playful: ['ну вредина)', 'ладно, молчу красиво', 'окей-окей, не пристаю'],
+      serious: ['хорошо.', 'поняла, не настаиваю.', 'окей.']
+    });
+  }
+
+  if (/зачем|почему|нахуя|нахуй/.test(normalized)) {
+    return pickByStyle(user, {
+      cute: ['потому что мне правда интересно)', 'хотела тебя разговорить чуть-чуть', 'ну я же рядом, вот и лезу аккуратно'],
+      calm: ['потому что я пытаюсь понять, что у тебя внутри происходит', 'без причины. просто захотелось быть ближе', 'чтобы не отвечать как пустая железка'],
+      playful: ['потому что могу)', 'а что, уже нельзя интересоваться?', 'любопытная я, смирись'],
+      serious: ['чтобы понять контекст.', 'чтобы ответить точнее.', 'из-за нехватки деталей.']
+    });
+  }
+
+  if (/а ты чо|а ты что|сама что|что узнала|чо узнала|что нового|расскажи/.test(normalized)) {
+    const topicLine = user.dialogue.lastTopic ? `я помню, мы зацепили тему про ${user.dialogue.lastTopic}` : 'я пока больше цепляюсь за то, что ты пишешь';
+    return pickByStyle(user, {
+      cute: [`${topicLine})`, 'могу новости глянуть, если хочешь: /news', 'а так я тут учусь быть не деревянной рядом с тобой'],
+      calm: [`${topicLine}.`, 'если хочешь, я могу сама нарыть инфу через /web', 'а сейчас мне интереснее, что у тебя за “много всего” было'],
+      playful: ['я? становлюсь опасно разговорчивой)', 'могу нарыть инфу. только скажи куда копать', 'а вообще мне интересно, что у тебя там за движ'],
+      serious: ['могу проверить новости через /news.', 'могу искать через /web запрос.', 'пока новых данных мало.']
+    });
+  }
+
+  if (/много всего|устал|заеб|пизд|тяжело|груст|плохо|нерв/.test(normalized)) {
+    user.dialogue.mood = 'support';
+    return pickByStyle(user, {
+      cute: ['иди сюда мысленно, я рядом)', 'хочешь без подробностей — просто скажи, день был тяжёлый или люди достали?', 'много всего — это уже звучит как “обнять и не спрашивать лишнего”'],
+      calm: ['поняла. не буду лезть грубо.', 'это больше про усталость, людей или дела?', 'можешь одним словом: бесит, устал или тревожно?'],
+      playful: ['так, кто испортил настроение?', 'много всего — звучит как сезонная серия без сценария', 'давай выберем главного виновника дня'],
+      serious: ['поняла. что главное из этого?', 'это про работу, людей или деньги?', 'давай разложим по одному пункту.']
+    });
+  }
+
+  if (/чо$|что$|че$|э$|мм$|ясно$|ладно$/.test(normalized) || user.dialogue.shortCount >= 2) {
+    return continueLastTopic(user);
+  }
+
+  return '';
+}
+
+function continueLastTopic(user) {
+  const topic = user.dialogue?.lastTopic || 'то, что у тебя сейчас в голове';
+  return pickByStyle(user, {
+    cute: [`я не отстану совсем, но спрошу мягко: ${topic} тебя больше бесит или тревожит?`, 'можем без длинных объяснений. просто скажи: норм / не норм', 'я рядом) выбери: поговорить, отвлечься или помолчать?'],
+    calm: [`давай так: по ${topic} тебе хочется решения или просто чтобы я была рядом?`, 'я не буду душнить. скажи, это важная тема или просто момент?', 'можем продолжить спокойно. что в этом самое неприятное?'],
+    playful: [`так, ${topic} само себя не обсудит)`, 'ну всё, я уже в теме. давай следующий кусок', 'выбирай: жалуемся, смеёмся или ищем выход?'],
+    serious: [`по теме "${topic}" нужен совет или просто разговор?`, 'что из этого главное?', 'продолжим с самого важного пункта.']
+  });
+}
+
+function detectTopic(normalized) {
+  if (/работ|дела|проект|код|сайт|бот/.test(normalized)) return 'дела и проекты';
+  if (/деньг|цена|куп|прод|клиент|заказ/.test(normalized)) return 'деньги и клиентов';
+  if (/люб|отнош|девуш|пар|скуч|обид|ревн/.test(normalized)) return 'отношения';
+  if (/новост|инф|инет|сайт|гугл|поиск/.test(normalized)) return 'инфу и новости';
+  if (/устал|груст|плохо|пизд|бля|нерв|зл/.test(normalized)) return 'настроение';
+  if (normalized.length > 18) return normalized.slice(0, 42);
+  return '';
+}
+
+function normalizeText(text) {
+  return String(text).toLowerCase().replace(/ё/g, 'е').replace(/[!?.,]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function pickByStyle(user, variants) {
+  user.localTurn ||= 0;
+  user.localTurn += 1;
+  const style = user.style || 'calm';
+  const list = variants[style] || variants.calm || variants.cute;
+  return list[user.localTurn % list.length];
 }
 
 function localReply(user, text) {

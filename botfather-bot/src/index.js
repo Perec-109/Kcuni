@@ -272,10 +272,6 @@ async function handleMessage(message) {
     return;
   }
 
-  if (await handleIgnoreRoleplay(chatId, user, text)) {
-    return;
-  }
-
   if (user.teaseIgnoreUntil && Date.now() < user.teaseIgnoreUntil && !text.startsWith('/')) {
     await maybeDelayTeaseReply(chatId, user, text);
     return;
@@ -286,8 +282,31 @@ async function handleMessage(message) {
     return;
   }
 
-  if (/(пришли|скинь|отправь|дай).*(картин|фото|кот|котик|мем|мил)/i.test(text) || /(картинку|котика|котиков|милую фотку)/i.test(text)) {
+  if (/(нарисуй|сгенерируй|создай).*(картин|фото|изображ|арт)|(?:пришли|скинь|отправь|дай).*(картин|фото|кот|котик|мем|мил)/i.test(text) || /(картинку|котика|котиков|милую фотку)/i.test(text)) {
     await handlePictureRequest(chatId, user, text);
+    return;
+  }
+
+  updateAutoMemory(user, text);
+
+  const planReply = maybeReplyWithPlans(user, text);
+  if (planReply) {
+    await saveUsers();
+    await send(chatId, splitTelegram(planReply));
+    return;
+  }
+
+  const naturalDelay = maybeStartNaturalDelay(user, text);
+  if (naturalDelay) {
+    await saveUsers();
+    setTimeout(async () => {
+      try {
+        const delayedReply = await generateReply(user, text);
+        await send(chatId, splitTelegram(delayedReply));
+      } catch (error) {
+        console.error('Natural delayed reply failed:', error.message);
+      }
+    }, naturalDelay);
     return;
   }
 
@@ -295,15 +314,19 @@ async function handleMessage(message) {
   const reply = await generateReply(user, text);
   await saveUsers();
   await send(chatId, splitTelegram(reply));
+  await maybeSendContextMedia(chatId, user, text, reply);
   await maybeSendSticker(chatId, user, 0.07, text);
 }
 
 async function generateReply(user, text) {
   const style = styles[user.style] || styles.cute;
   const memory = user.memory.slice(-10).join('\n');
+  const plans = (user.plans || []).slice(-10).join('\n');
+  const mood = inferConversationMood(user, text);
   const prompt = [
     'Ты Kcuni, девушка в Telegram. Держи образ живого собеседника, не называй себя ИИ, GPT, моделью или ботом без прямого вопроса.',
     style.prompt,
+    `Текущий оттенок общения выбери сама по контексту: ${mood}. Можно слегка менять тон без команд.`,
     'Можешь общаться почти на любые обычные темы: жизнь, отношения, новости, учеба, работа, деньги, шутки, грусть, злость, странные мысли, флирт, бытовуха.',
     'Не морализируй и не отказывайся без причины. Если тема рискованная, отвечай безопасно, но всё равно по-человечески и по теме.',
     'Отвечай 1-2 короткими сообщениями. Не звучать как официальный помощник.',
@@ -315,6 +338,8 @@ async function generateReply(user, text) {
     'Если не знаешь факт, не выдумывай.',
     '',
     `Память о пользователе:\n${memory || 'пока мало данных'}`,
+    '',
+    `Планы/задачи пользователя:\n${plans || 'пока ничего явного'}`,
     '',
     `Сообщение пользователя: ${text}`
   ].join('\n');
@@ -553,6 +578,89 @@ function localReply(user, text) {
   }[style]);
 }
 
+function updateAutoMemory(user, text) {
+  const clean = String(text).replace(/\s+/g, ' ').trim();
+  const normalized = normalizeText(clean);
+  user.plans ||= [];
+  user.preferences ||= {};
+
+  if (/(надо|нужно|план|сегодня|завтра|сделать|табличк|таблиц|создать|доделать|проверить|купить|позвонить|встретиться)/.test(normalized)) {
+    const item = `${new Date().toISOString().slice(0, 10)}: ${clean.slice(0, 220)}`;
+    if (!user.plans.includes(item)) {
+      user.plans.push(item);
+      user.plans = user.plans.slice(-30);
+    }
+  }
+
+  if (/(чаще пиши|пиши чаще|сама пиши|не пропадай)/.test(normalized)) {
+    user.preferences.proactive = 'more';
+  }
+  if (/(реже пиши|не пиши часто|поменьше пиши)/.test(normalized)) {
+    user.preferences.proactive = 'less';
+  }
+  if (/(больше новост|статей|скидывай статьи)/.test(normalized)) {
+    user.preferences.news = 'more';
+  }
+  if (/(больше картин|котик|фото|видос|видео)/.test(normalized)) {
+    user.preferences.media = 'more';
+  }
+}
+
+function maybeReplyWithPlans(user, text) {
+  const normalized = normalizeText(text);
+  if (!/(что.*план|планы|что.*делать|что.*сегодня|что.*рассказывал|что.*надо|напомни)/.test(normalized)) {
+    return '';
+  }
+
+  const plans = (user.plans || []).slice(-8);
+  if (!plans.length) {
+    return 'по планам я пока явно помню мало. но если коротко: ты хотел, чтобы я лучше держала диалог, сама подстраивалась, присылала медиа/новости и помогала с табличкой.';
+  }
+
+  return [
+    'я помню вот это по твоим планам:',
+    ...plans.map((item, index) => `${index + 1}. ${item.replace(/^\d{4}-\d{2}-\d{2}: /, '')}`),
+    'если хочешь, я могу дальше разложить это в табличку: задача / статус / что сделать дальше.'
+  ].join('\n');
+}
+
+function maybeStartNaturalDelay(user, text) {
+  const normalized = normalizeText(text);
+  if (!/(игнор|безразлич|равнодуш|не отвечай|ответь через|через \d+ минут|молчи)/.test(normalized)) {
+    return 0;
+  }
+
+  const minutes = parseDelayMinutes(normalized) || 5;
+  const safeMinutes = Math.min(Math.max(minutes, 1), 20);
+  user.teaseIgnoreUntil = Date.now() + safeMinutes * 60 * 1000;
+  user.dialogue ||= {};
+  user.dialogue.mood = 'teaseIgnore';
+  return safeMinutes * 60 * 1000;
+}
+
+async function maybeSendContextMedia(chatId, user, text, reply) {
+  const normalized = normalizeText(`${text} ${reply}`);
+  const wantsMoreMedia = user.preferences?.media === 'more';
+  if (/(котик|кот|мил(о|ый|ая)|уют|груст|скуч|картин|фото)/.test(normalized) && Math.random() < (wantsMoreMedia ? 0.35 : 0.16)) {
+    await handlePictureRequest(chatId, user, text);
+    return;
+  }
+
+  if (/(видео|видос|ролик|движ|скучно)/.test(normalized) && Math.random() < (wantsMoreMedia ? 0.22 : 0.1)) {
+    await handleVideoRequest(chatId, user, text);
+  }
+}
+
+function inferConversationMood(user, text) {
+  const normalized = normalizeText(text);
+  if (/(флирт|милая|красив|скуч|люб|обним|цел)/.test(normalized) || user.dialogue?.mood === 'flirt') return 'тепло, игриво, с легким флиртом';
+  if (/(игнор|безразлич|равнодуш|молчи)/.test(normalized)) return 'игривая холодность, но без вечного режима';
+  if (/(план|задач|табличк|работ|проект|сайт|бот)/.test(normalized)) return 'собранно и полезно, но живым языком';
+  if (/(груст|плохо|устал|пизд|бесит|заеб)/.test(normalized)) return 'мягко, поддерживающе, без душноты';
+  if (/(новост|стать|инф|что узнала)/.test(normalized)) return 'любопытно, с короткой выжимкой';
+  return 'естественно, чуть тепло, без шаблонов';
+}
+
 async function handleIgnoreRoleplay(chatId, user, text) {
   const normalized = normalizeText(text);
   if (!/(игнор|безразлич|равнодуш|не отвечай|ответь через|через \d+ минут|молчи)/.test(normalized)) {
@@ -650,6 +758,16 @@ async function handleVideoRequest(chatId, user, text = '') {
 
 function randomCutePhotoUrl(text = '') {
   const seed = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+  const normalized = normalizeText(text);
+  if (/(нарисуй|сгенерируй|создай|арт|изображ)/.test(normalized)) {
+    const prompt = encodeURIComponent(
+      text
+        .replace(/нарисуй|сгенерируй|создай|картинку|изображение|фото|арт/gi, '')
+        .trim()
+        .slice(0, 180) || 'cute cozy cat, warm soft light, realistic'
+    );
+    return `https://image.pollinations.ai/prompt/${prompt}?width=900&height=900&nologo=true&seed=${encodeURIComponent(seed)}`;
+  }
   if (/кот|cat|кис/i.test(text)) return `https://cataas.com/cat?width=900&height=900&seed=${seed}`;
   const urls = [
     `https://cataas.com/cat/cute?width=900&height=900&seed=${seed}`,
@@ -676,7 +794,9 @@ function startProactiveLoop() {
       if (!user.chatId || user.proactive === false) continue;
       const last = user.lastProactiveAt || 0;
       const lastSeen = user.lastSeenAt || 0;
-      const quietEnough = Date.now() - Math.max(last, lastSeen) > intervalMs;
+      const preference = user.preferences?.proactive;
+      const userInterval = preference === 'more' ? intervalMs * 0.65 : preference === 'less' ? intervalMs * 1.8 : intervalMs;
+      const quietEnough = Date.now() - Math.max(last, lastSeen) > userInterval;
       if (!quietEnough) continue;
 
       try {
@@ -697,7 +817,13 @@ function startProactiveLoop() {
 
 async function proactiveMessage(user) {
   const style = styles[user.style] || styles.cute;
-  if (Math.random() < 0.55) {
+  if ((user.plans || []).length && Math.random() < 0.25) {
+    const plan = user.plans[user.plans.length - 1].replace(/^\d{4}-\d{2}-\d{2}: /, '');
+    return `я тут вспомнила про твой план: ${plan}\nчто с ним, двигаем или пока отложим?`;
+  }
+
+  const newsChance = user.preferences?.news === 'more' ? 0.7 : 0.45;
+  if (Math.random() < newsChance) {
     const news = await buildNewsDigest(user, user.newsTopic || 'mixed', true);
     if (news) return news;
   }

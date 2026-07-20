@@ -13,8 +13,9 @@ const mockServer = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
 
   if (url.pathname.includes('/file/')) {
-    response.writeHead(200, { 'Content-Type': 'image/webp' });
-    response.end(Buffer.from('fake-webp-image'));
+    const isVideo = url.pathname.endsWith('.mp4');
+    response.writeHead(200, { 'Content-Type': isVideo ? 'video/mp4' : 'image/webp' });
+    response.end(Buffer.from(isVideo ? 'fake-mp4-video' : 'fake-webp-image'));
     return;
   }
 
@@ -33,6 +34,12 @@ const mockServer = createServer(async (request, response) => {
     const prompt = JSON.stringify(body);
     const text = prompt.includes('Telegram-стикер')
       ? 'фу, не присылай мне такое 😑'
+      : prompt.includes('Посмотри доступное видео целиком')
+        ? 'в видео обсуждают нейросети и показывают эксперимент с ними'
+      : prompt.includes('Внимательно рассмотри изображение')
+        ? 'на картинке красный цветок крупным планом'
+      : prompt.includes('Это только превью большого Telegram-видео')
+        ? 'виден человек в очках перед доской'
       : prompt.includes('Период: последние 7 дней')
         ? 'вот тебе короткая сводка новостей за неделю'
         : prompt.includes('проверка тавтологии')
@@ -49,7 +56,11 @@ const mockServer = createServer(async (request, response) => {
   calls.push({ method, body });
   let result = true;
   if (method === 'getMe') result = { id: 1, is_bot: true, first_name: 'Kcuni', username: 'kcuni_smoke_bot' };
-  if (method === 'getFile') result = { file_path: 'stickers/test.webp' };
+  if (method === 'getFile') {
+    result = String(body.file_id).startsWith('video-')
+      ? { file_path: 'videos/test.mp4', file_size: 1024 }
+      : { file_path: 'stickers/test.webp', file_size: 512 };
+  }
   response.writeHead(200, { 'Content-Type': 'application/json' });
   response.end(JSON.stringify({ ok: true, result }));
 });
@@ -95,7 +106,7 @@ try {
 
   const health = await fetch(`http://127.0.0.1:${appPort}/healthz`);
   assert.equal(health.status, 200);
-  assert.deepEqual(await health.json(), { ok: true, service: 'kcuni-bot', version: '2026-07-21-reminders-feedback-1' });
+  assert.deepEqual(await health.json(), { ok: true, service: 'kcuni-bot', version: '2026-07-21-video-understanding-1' });
 
   const unauthorized = await fetch(`http://127.0.0.1:${appPort}/telegram/webhook`, { method: 'POST', body: '{}' });
   assert.equal(unauthorized.status, 401);
@@ -113,13 +124,13 @@ try {
   await waitForMessageContaining('буду сама выбирать момент', 5000);
 
   await postUpdate({ text: '/Headline@kcuni_smoke_bot' });
-  await waitForMessageContaining('https://example.com/ai', 5000);
+  await waitForMessageContaining('https://example.com/ai', 15000);
 
   await postUpdate({ text: '/HELP@kcuni_smoke_bot' });
   await waitForMessageContaining('команды Kcuni', 5000);
 
   await postUpdate({ text: '/status@kcuni_smoke_bot' });
-  await waitForMessageContaining('Kcuni 2026-07-21-reminders-feedback-1', 5000);
+  await waitForMessageContaining('Kcuni 2026-07-21-video-understanding-1', 5000);
 
   await postUpdate({ text: '/unknown_command@kcuni_smoke_bot' });
   await waitForMessageContaining('не знаю такую команду', 5000);
@@ -141,6 +152,9 @@ try {
   await postUpdate({ text: 'напиши мне завтра в 21:30-21:35' });
   await waitForMessageContaining('21:30–21:35', 5000);
 
+  await postUpdate({ text: 'напиши мне в 0.50' });
+  await waitForMessageContaining('в 00:50', 5000);
+
   await postUpdate({ text: '/reminders' });
   await waitForMessageContaining('активные напоминания', 5000);
 
@@ -148,7 +162,7 @@ try {
   await waitForMessageContaining('все таймеры', 5000);
 
   await postUpdate({ text: '/proactive now' });
-  await waitForMessageContaining('https://example.com/science', 5000);
+  await waitForMessageContaining('https://example.com/science', 15000);
 
   await postUpdate({ text: 'ты дура' });
   await waitForMessageContaining('иди нахуй', 5000);
@@ -177,6 +191,44 @@ try {
 
   await postUpdate({ sticker: { file_id: 'sticker-1', file_unique_id: 'unique-1', emoji: '🤮', width: 512, height: 512 } });
   await waitForMessageContaining('не присылай мне такое', 5000);
+
+  await postUpdate({
+    video: { file_id: 'video-1', file_unique_id: 'video-unique-1', file_size: 1024, mime_type: 'video/mp4', duration: 12 },
+    caption: 'что тут происходит?'
+  });
+  await waitForMessageContaining('обсуждают нейросети', 5000);
+
+  await postUpdate({
+    text: 'про что в видео говорят?',
+    reply_to_message: {
+      message_id: 777,
+      video: { file_id: 'video-2', file_unique_id: 'video-unique-2', file_size: 2048, mime_type: 'video/mp4', duration: 45 }
+    }
+  });
+  await waitForMessageContaining('показывают эксперимент', 5000);
+
+  await postUpdate({
+    text: 'что это за картинка?',
+    reply_to_message: {
+      message_id: 778,
+      photo: [{ file_id: 'photo-1', file_unique_id: 'photo-unique-1', file_size: 512, width: 800, height: 600 }]
+    }
+  });
+  await waitForMessageContaining('красный цветок', 5000);
+
+  await postUpdate({
+    text: 'перескажи это видео',
+    reply_to_message: {
+      message_id: 779,
+      video: {
+        file_id: 'large-video', file_unique_id: 'large-video-unique',
+        file_size: 21 * 1024 * 1024, mime_type: 'video/mp4', duration: 3600,
+        thumbnail: { file_id: 'preview-1', file_unique_id: 'preview-unique', width: 320, height: 180 }
+      }
+    }
+  });
+  await waitForMessageContaining('больше 20 МБ', 5000);
+  await waitForMessageContaining('человек в очках', 5000);
 
   await postUpdate({ text: '/news week' });
   await waitForMessageContaining('сводка новостей за неделю', 5000);

@@ -19,12 +19,14 @@ services:
         value: gemini-flash-lite-latest
       - key: NEWS_FEEDS
         value: https://news.google.com/rss?hl=ru&gl=RU&ceid=RU:ru
-      - key: PROACTIVE_MINUTES
-        value: "120"
-      - key: PROACTIVE_MIN_RANDOM
-        value: "45"
-      - key: PROACTIVE_MAX_RANDOM
-        value: "180"
+      - key: DEFAULT_TIMEZONE
+        value: Europe/Minsk
+      - key: PROACTIVE_SCHEDULE
+        value: "13:00,21:00,23:30"
+      - key: PROACTIVE_CHECK_MINUTES
+        value: "5"
+      - key: PROACTIVE_SILENCE_MINUTES
+        value: "360"
       - key: PROACTIVE_MEDIA_CHANCE
         value: "0.04"
       - key: MAX_MESSAGES_PER_REPLY

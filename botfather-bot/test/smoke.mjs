@@ -21,8 +21,8 @@ const mockServer = createServer(async (request, response) => {
   if (url.pathname === '/rss') {
     response.writeHead(200, { 'Content-Type': 'application/rss+xml' });
     response.end(`<?xml version="1.0"?><rss><channel>
-      <item><title>Новая модель искусственного интеллекта вышла сегодня</title><link>https://example.com/ai</link><pubDate>${new Date().toUTCString()}</pubDate></item>
-      <item><title>Учёные сделали необычное открытие</title><link>https://example.com/science</link><pubDate>${new Date(Date.now() - 2 * 86400000).toUTCString()}</pubDate></item>
+      <item><title>Новая модель искусственного интеллекта вышла сегодня</title><description>Разработчики представили новую модель искусственного интеллекта. В статье описаны её возможности, ограничения и примеры использования в рабочих задачах.</description><link>https://example.com/ai</link><pubDate>${new Date().toUTCString()}</pubDate></item>
+      <item><title>Учёные сделали необычное открытие</title><description>Учёные опубликовали результаты нового исследования. Авторы объясняют, как открытие было сделано, какие данные они проверили и почему это может быть важно для науки.</description><link>https://example.com/science</link><pubDate>${new Date(Date.now() - 2 * 86400000).toUTCString()}</pubDate></item>
     </channel></rss>`);
     return;
   }
@@ -103,8 +103,14 @@ try {
   await postUpdate({ text: '/schedule 13:00,21:00,23:30' });
   await waitForMessageContaining('13:00, 21:00, 23:30', 5000);
 
+  await postUpdate({ text: '/schedule auto' });
+  await waitForMessageContaining('буду сама выбирать момент', 5000);
+
   await postUpdate({ text: 'я живу в Минске и люблю космос' });
   await waitForMessageContaining('продолжаю без приветствия', 5000);
+
+  await postUpdate({ text: '/proactive now' });
+  await waitForMessageContaining('https://example.com/science', 5000);
 
   await postUpdate({ sticker: { file_id: 'sticker-1', file_unique_id: 'unique-1', emoji: '🤮', width: 512, height: 512 } });
   await waitForMessageContaining('не присылай мне такое', 5000);

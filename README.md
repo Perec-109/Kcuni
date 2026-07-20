@@ -1,7 +1,9 @@
 # Kcuni
 
 Kcuni is a Telegram character bot with conversation styles, per-user memory,
-media handling, news and proactive messages.
+media handling, contextual news and proactive messages. In automatic mode it
+chooses different local times each day and can connect a recent conversation
+topic with a fresh article, a short summary and the full source link.
 
 - [Project site](https://perec-109.github.io/Kcuni/)
 - Bot source and local setup: [`botfather-bot/`](botfather-bot/)
@@ -19,6 +21,10 @@ to long polling.
 5. Deploy. The service registers its Render URL as the Telegram webhook
    automatically, replaces the Telegram website menu button with Kcuni's
    command list, and exposes `/healthz` for health checks.
+
+The `Keep Kcuni awake` GitHub workflow pings that health endpoint every ten
+minutes. This is needed for proactive messages on Render Free, whose web
+services otherwise sleep after a period without inbound traffic.
 
 Do not commit bot tokens or API keys to GitHub.
 

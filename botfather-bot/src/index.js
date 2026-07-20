@@ -69,7 +69,7 @@ async function configureTelegramMenu() {
     { command: 'style', description: 'Настроить, как Kcuni отвечает' },
     { command: 'timezone', description: 'Указать часовой пояс' },
     { command: 'location', description: 'Указать город' },
-    { command: 'schedule', description: 'Время самостоятельных сообщений' },
+    { command: 'schedule', description: 'Автовыбор или ручное время сообщений' },
     { command: 'proactive', description: 'Включить или выключить сообщения от Kcuni' },
     { command: 'headline', description: 'Короткая сводка свежих новостей' },
     { command: 'news_week', description: 'Новости за последнюю неделю' },
@@ -347,6 +347,16 @@ async function handleMessage(message) {
     return;
   }
 
+  if (text === '/proactive now') {
+    user.proactive = true;
+    const message = await proactiveMessage(user);
+    recordConversation(user, 'assistant', `[сама написала по просьбе] ${message}`, 'proactive');
+    refreshMemorySummaries(user);
+    await saveUsers();
+    await send(chatId, splitTelegram(message));
+    return;
+  }
+
   if (text === '/proactive') {
     user.proactive = !user.proactive;
     await saveUsers();
@@ -394,20 +404,32 @@ async function handleMessage(message) {
   }
 
   if (text === '/schedule') {
+    const automatic = user.proactiveTiming !== 'fixed';
     await send(chatId, [
-      `сама пишу по твоему времени: ${getUserSchedule(user).join(', ')}`,
-      'изменить: /schedule 13:00,21:00,23:30'
+      automatic
+        ? `я сама выбираю время. сегодня могу написать примерно в: ${getUserSchedule(user).join(', ')}`
+        : `ручное время: ${getUserSchedule(user).join(', ')}`,
+      'авторежим: /schedule auto; вручную: /schedule 13:00,21:00,23:30'
     ]);
     return;
   }
 
   if (text.startsWith('/schedule ')) {
-    const schedule = parseSchedule(text.slice('/schedule '.length));
+    const requested = text.slice('/schedule '.length).trim();
+    if (/^(auto|авто|сама)$/i.test(requested)) {
+      user.proactiveTiming = 'auto';
+      user.proactive = true;
+      await saveUsers();
+      await send(chatId, `хорошо, буду сама выбирать момент) сегодня ориентируюсь на ${getUserSchedule(user).join(', ')} (${formatTimezone(user)})`);
+      return;
+    }
+    const schedule = parseSchedule(requested);
     if (!schedule.length) {
-      await send(chatId, 'не поняла расписание. пример: /schedule 13:00,21:00,23:30');
+      await send(chatId, 'не поняла расписание. пример: /schedule auto или /schedule 13:00,21:00,23:30');
       return;
     }
     user.proactiveSchedule = schedule;
+    user.proactiveTiming = 'fixed';
     user.proactive = true;
     await saveUsers();
     await send(chatId, `договорились, буду сама писать примерно в ${schedule.join(', ')} (${formatTimezone(user)})`);
@@ -643,7 +665,9 @@ function commandHelp() {
     '/web запрос - поиск в интернете',
     '/url ссылка - прочитать страницу',
     '/proactive - включить/выключить, чтобы я сама писала',
-    '/schedule 13:00,21:00,23:30 - время самостоятельных сообщений',
+    '/proactive now - показать пример самостоятельного сообщения',
+    '/schedule auto - я сама выбираю время',
+    '/schedule 13:00,21:00 - задать время вручную',
     '/timezone Europe/Minsk - часовой пояс',
     '/location Минск - запомнить город',
     '/stickers - стикеры',
@@ -1163,10 +1187,14 @@ async function proactiveMessage(user) {
     return `я тут вспомнила про твой план: ${plan}\nчто с ним, двигаем или пока отложим?`;
   }
 
-  const newsChance = user.preferences?.news === 'more' ? 0.7 : 0.45;
-  if (Math.random() < newsChance) {
-    const news = await buildNewsDigest(user, user.newsTopic || 'mixed', true);
-    if (news) return news;
+  const today = localDateKey(user);
+  const newsChance = user.preferences?.news === 'more' ? 0.8 : 0.45;
+  if (user.lastProactiveNewsDate !== today || Math.random() < newsChance) {
+    const article = await buildContextualArticle(user);
+    if (article) {
+      user.lastProactiveNewsDate = today;
+      return article;
+    }
   }
 
   const variants = {
@@ -1195,6 +1223,83 @@ async function proactiveMessage(user) {
   ].join('\n');
 
   return (await callAi(user, prompt)) || fallback;
+}
+
+async function buildContextualArticle(user, days = 7) {
+  const items = await loadNewsItems(days);
+  if (!items.length) return '';
+
+  user.sentNewsLinks ||= [];
+  const sent = new Set(user.sentNewsLinks);
+  const available = items.filter((item) => item.link && !sent.has(item.link));
+  if (!available.length) return '';
+
+  const interest = inferNewsInterest(user);
+  const ranked = available
+    .map((item) => ({ item, score: scoreNewsItem(item, interest) }))
+    .sort((left, right) => right.score - left.score || Date.parse(right.item.publishedAt || 0) - Date.parse(left.item.publishedAt || 0));
+  const selected = ranked[0]?.item;
+  if (!selected) return '';
+
+  let articleText = selected.summary || '';
+  if (articleText.length < 160) {
+    try {
+      articleText = htmlToText(await fetchText(selected.link)).slice(0, 4500) || articleText;
+    } catch (error) {
+      console.error('Article preview failed:', selected.link, error.message);
+    }
+  }
+
+  const prompt = [
+    'Напиши одно живое Telegram-сообщение от Kcuni: она сама нашла статью и решила поделиться.',
+    `Недавняя тема разговора: ${interest.label}.`,
+    interest.evidence ? `Что именно писал пользователь: ${interest.evidence}` : '',
+    `Заголовок: ${selected.title}`,
+    `Текст или анонс: ${compactText(articleText || selected.title, 4500)}`,
+    'В 2–4 коротких предложениях объясни, что там интересного. Не выдумывай факты.',
+    'Естественно свяжи статью с недавним разговором, но только если связь реальная.',
+    'Не здоровайся формально, не пиши как новостной бот.',
+    `Стиль: ${(styles[user.style] || styles.calm).prompt}`
+  ].filter(Boolean).join('\n\n');
+
+  const ai = await callAi(user, prompt);
+  const fallbackSummary = compactText(articleText || selected.title, 420);
+  let message = ai || `смотри, я тут нашла статью про ${interest.label} и вспомнила наш разговор)\n\n${selected.title}\n${fallbackSummary}`;
+  if (!message.includes(selected.link)) message = `${message}\n\nполная статья: ${selected.link}`;
+
+  user.sentNewsLinks.push(selected.link);
+  user.sentNewsLinks = user.sentNewsLinks.slice(-80);
+  return message;
+}
+
+function inferNewsInterest(user) {
+  const recentEntries = (user.conversationLog || [])
+    .filter((entry) => entry.role === 'user' && Date.now() - Date.parse(entry.at) < 30 * 24 * 60 * 60 * 1000)
+    .slice(-35);
+  const evidence = recentEntries.at(-1)?.content || '';
+  const corpus = normalizeText(recentEntries.map((entry) => entry.content).join(' '));
+  const interests = [
+    { label: 'искусственный интеллект и нейросети', pattern: /(?:искусствен\S* интеллект|нейросет|chatgpt|gemini|openai|\bии\b|\bai\b)/i, keywords: ['ии', 'ai', 'нейро', 'искусственн', 'chatgpt', 'gemini', 'openai', 'модель'], topic: 'tech' },
+    { label: 'космос и науку', pattern: /космос|планет|ракет|астроном|наук|исследов/i, keywords: ['космос', 'планет', 'ракет', 'астрон', 'наук', 'учен', 'исслед'], topic: 'interesting' },
+    { label: 'технологии', pattern: /технолог|код|программ|бот|сайт|гаджет|смартфон/i, keywords: ['технолог', 'код', 'програм', 'бот', 'сайт', 'гаджет', 'смартфон'], topic: 'tech' },
+    { label: 'игры', pattern: /игр|гейм|стим|steam|playstation|xbox/i, keywords: ['игр', 'гейм', 'steam', 'playstation', 'xbox'], topic: 'interesting' },
+    { label: 'автомобили', pattern: /авто|машин|электромоб|тесл/i, keywords: ['авто', 'машин', 'электромоб', 'tesla'], topic: 'interesting' }
+  ];
+  const matched = interests.find((interest) => interest.pattern.test(corpus));
+  if (matched) {
+    const matchedEntry = [...recentEntries].reverse().find((entry) => matched.pattern.test(normalizeText(entry.content)));
+    return { ...matched, evidence: compactText(matchedEntry?.content || evidence, 300) };
+  }
+  const manualTopic = user.newsTopic || 'mixed';
+  const labels = { tech: 'технологии и ИИ', interesting: 'интересные открытия', sad: 'важные события', war: 'безопасность и конфликты', mixed: 'то, что может тебя зацепить' };
+  return { label: labels[manualTopic] || labels.mixed, evidence: compactText(evidence, 300), keywords: [], topic: manualTopic };
+}
+
+function scoreNewsItem(item, interest) {
+  const haystack = normalizeText(`${item.title} ${item.summary || ''}`);
+  const keywordScore = (interest.keywords || []).reduce((score, keyword) => score + (haystack.includes(normalizeText(keyword)) ? 3 : 0), 0);
+  const topicMatch = filterNewsByTopic([item], interest.topic || 'mixed').length ? 1 : 0;
+  return keywordScore + topicMatch;
 }
 
 async function maybeSendSticker(chatId, user, probability, context = '') {
@@ -1445,25 +1550,10 @@ async function handleNews(chatId, user, topic = 'mixed', days = 1) {
 }
 
 async function buildNewsDigest(user, topic = 'mixed', proactive = false, days = 2) {
-  const feeds = (env.NEWS_FEEDS || '').split(',').map((item) => item.trim()).filter(Boolean);
-  if (!feeds.length) return '';
-
-  const items = [];
-  for (const feed of feeds.slice(0, 4)) {
-    try {
-      const xml = await fetchText(feed);
-      items.push(...parseRss(xml).slice(0, days >= 7 ? 30 : 10));
-    } catch (error) {
-      console.error('News feed failed:', feed, error.message);
-    }
-  }
-
+  const items = await loadNewsItems(days);
   if (!items.length) return '';
 
-  const cutoff = Date.now() - Math.max(1, days) * 24 * 60 * 60 * 1000;
-  const recent = items.filter((item) => !item.publishedAt || Date.parse(item.publishedAt) >= cutoff);
-  const unique = [...new Map((recent.length ? recent : items).map((item) => [item.title.toLowerCase(), item])).values()];
-  const filtered = filterNewsByTopic(unique, topic).slice(0, days >= 7 ? 8 : 5);
+  const filtered = filterNewsByTopic(items, topic).slice(0, days >= 7 ? 8 : 5);
   if (!filtered.length) return '';
 
   const digest = filtered.map((item, index) => {
@@ -1492,6 +1582,28 @@ async function buildNewsDigest(user, topic = 'mixed', proactive = false, days = 
 
   const ai = await callAi(user, prompt);
   return ai || `я тут собрала ${topicLabel} новости за ${days >= 7 ? 'неделю' : 'последние дни'}:\n${digest}`;
+}
+
+async function loadNewsItems(days = 2) {
+  const feeds = (env.NEWS_FEEDS || '').split(',').map((item) => item.trim()).filter(Boolean);
+  if (!feeds.length) return [];
+
+  const items = [];
+  for (const feed of feeds.slice(0, 4)) {
+    try {
+      const xml = await fetchText(feed);
+      items.push(...parseRss(xml).slice(0, days >= 7 ? 30 : 10));
+    } catch (error) {
+      console.error('News feed failed:', feed, error.message);
+    }
+  }
+
+  if (!items.length) return [];
+
+  const cutoff = Date.now() - Math.max(1, days) * 24 * 60 * 60 * 1000;
+  const recent = items.filter((item) => !item.publishedAt || Date.parse(item.publishedAt) >= cutoff);
+  const unique = [...new Map(recent.map((item) => [item.title.toLowerCase(), item])).values()];
+  return unique.sort((left, right) => Date.parse(right.publishedAt || 0) - Date.parse(left.publishedAt || 0));
 }
 
 function filterNewsByTopic(items, topic) {
@@ -1703,6 +1815,8 @@ function getUser(chatId, from) {
     proactive: true,
     timezone: DEFAULT_TIMEZONE,
     proactiveSchedule: [...DEFAULT_PROACTIVE_SCHEDULE],
+    proactiveTiming: 'auto',
+    sentNewsLinks: [],
     conversationLog: [],
     memorySummaries: { daily: [], weekly: [], monthly: [] },
     lastSeenAt: 0
@@ -1720,6 +1834,8 @@ function normalizeUser(user) {
   user.memorySummaries.weekly ||= [];
   user.memorySummaries.monthly ||= [];
   user.proactiveSchedule ||= [...DEFAULT_PROACTIVE_SCHEDULE];
+  user.proactiveTiming ||= schedulesEqual(user.proactiveSchedule, DEFAULT_PROACTIVE_SCHEDULE) ? 'auto' : 'fixed';
+  user.sentNewsLinks ||= [];
   if (!user.timezone && !Number.isFinite(user.timezoneOffsetMinutes)) user.timezone = DEFAULT_TIMEZONE;
   return user;
 }
@@ -1841,16 +1957,36 @@ function parseSchedule(value) {
   }).filter(Boolean))].sort();
 }
 
-function getUserSchedule(user) {
+function getUserSchedule(user, timestamp = Date.now()) {
+  if (user.proactiveTiming !== 'fixed') return buildAutomaticSchedule(user, timestamp);
   const schedule = parseSchedule(user.proactiveSchedule?.join(',') || '');
   return schedule.length ? schedule : [...DEFAULT_PROACTIVE_SCHEDULE];
+}
+
+function buildAutomaticSchedule(user, timestamp = Date.now()) {
+  const dateKey = localDateKey(user, timestamp);
+  const digest = createHash('sha256').update(`${user.id || user.chatId || 'kcuni'}:${dateKey}`).digest();
+  const preference = user.preferences?.proactive;
+  const windows = preference === 'less'
+    ? [[12 * 60, 21 * 60 + 30]]
+    : preference === 'more'
+      ? [[10 * 60 + 30, 13 * 60 + 30], [15 * 60 + 30, 19 * 60], [20 * 60 + 30, 23 * 60 + 20]]
+      : [[11 * 60, 15 * 60], [18 * 60, 23 * 60 + 15]];
+  return windows.map(([start, end], index) => {
+    const minute = start + (digest[index] % (end - start + 1));
+    return `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
+  }).sort();
+}
+
+function schedulesEqual(left, right) {
+  return parseSchedule(Array.isArray(left) ? left.join(',') : left).join(',') === parseSchedule(Array.isArray(right) ? right.join(',') : right).join(',');
 }
 
 function findDueScheduleSlot(user, timestamp) {
   const parts = getUserDateParts(user, timestamp);
   const currentMinutes = parts.hour * 60 + parts.minute;
   const windowMinutes = Math.max(5, Number(env.PROACTIVE_SLOT_WINDOW_MINUTES || 15));
-  for (const slot of getUserSchedule(user)) {
+  for (const slot of getUserSchedule(user, timestamp)) {
     const [hour, minute] = slot.split(':').map(Number);
     const delta = currentMinutes - (hour * 60 + minute);
     if (delta >= 0 && delta < windowMinutes) return { slot, id: `${parts.dateKey}/${slot}` };
@@ -2127,10 +2263,12 @@ function parseRss(xml) {
       const title = readXmlTag(block, 'title');
       const published = readXmlTag(block, 'pubDate') || readXmlTag(block, 'published') || readXmlTag(block, 'updated');
       const linkTag = block.match(/<link\b[^>]*href=["']([^"']+)["'][^>]*\/?\s*>/i)?.[1] || readXmlTag(block, 'link');
+      const summary = readXmlTag(block, 'description') || readXmlTag(block, 'summary') || readXmlTag(block, 'content');
       const parsedDate = Date.parse(published);
       return {
         title: decodeXml(title),
         link: decodeXml(linkTag),
+        summary: compactText(htmlToText(decodeXml(summary)), 1800),
         publishedAt: Number.isFinite(parsedDate) ? new Date(parsedDate).toISOString() : ''
       };
     })

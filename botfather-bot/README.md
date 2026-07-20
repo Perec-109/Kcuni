@@ -1,5 +1,15 @@
 # Kcuni BotFather version
 
+## Render deployment
+
+The root `render.yaml` deploys this bot as a free Render web service. Render
+provides `RENDER_EXTERNAL_URL`; when it is present, Kcuni registers
+`/telegram/webhook` with Telegram and listens on `PORT`. Without a public URL,
+the same entry point uses long polling for local development.
+
+Required Render secret: `BOT_TOKEN`. Optional AI secret: `GEMINI_API_KEY`.
+Never store either value in this repository.
+
 Это простая версия Kcuni как обычного Telegram-бота через BotFather.
 
 Плюсы:

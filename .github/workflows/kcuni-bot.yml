@@ -1,0 +1,33 @@
+name: Kcuni bot checks
+
+on:
+  push:
+    paths:
+      - "botfather-bot/**"
+      - "render.yaml"
+      - ".github/workflows/kcuni-bot.yml"
+  pull_request:
+    paths:
+      - "botfather-bot/**"
+      - "render.yaml"
+      - ".github/workflows/kcuni-bot.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: botfather-bot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: botfather-bot/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm test

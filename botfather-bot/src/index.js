@@ -17,7 +17,7 @@ const USERS_FILE = new URL('../data/users.json', import.meta.url);
 const MAX_MESSAGES_PER_REPLY = Number(env.MAX_MESSAGES_PER_REPLY || 2);
 const DEFAULT_TIMEZONE = env.DEFAULT_TIMEZONE || 'Europe/Minsk';
 const DEFAULT_PROACTIVE_SCHEDULE = parseSchedule(env.PROACTIVE_SCHEDULE || '13:00,21:00,23:30');
-const BUILD_VERSION = '2026-07-20-command-fix-1';
+const BUILD_VERSION = '2026-07-21-status-repeat-1';
 
 const styles = {
   cute: {
@@ -76,6 +76,7 @@ async function configureTelegramMenu() {
     { command: 'news_week', description: 'Новости за последнюю неделю' },
     { command: 'memory', description: 'Посмотреть, что Kcuni помнит' },
     { command: 'stickers', description: 'Посмотреть память стикеров' },
+    { command: 'status', description: 'Проверить работу Kcuni' },
     { command: 'help', description: 'Все команды Kcuni' }
   ];
 
@@ -314,6 +315,11 @@ async function handleMessage(message) {
 
   if (text === '/help' || text === '/commands') {
     await send(chatId, commandHelp());
+    return;
+  }
+
+  if (text === '/status') {
+    await send(chatId, buildStatusReport(user));
     return;
   }
 
@@ -663,11 +669,25 @@ async function generateReply(user, text) {
     `Сообщение пользователя: ${text}`
   ].join('\n');
 
-  const ai = await callAi(user, prompt);
-  if (ai) return removeRepeatedGreeting(user, ai, text);
-  const contextual = contextualLocalReply(user, text);
-  if (contextual) return removeRepeatedGreeting(user, contextual, text);
-  return removeRepeatedGreeting(user, localReply(user, text), text);
+  const ai = removeRepeatedGreeting(user, await callAi(user, prompt), text);
+  if (ai && !isRepeatedReply(user, ai)) return ai;
+
+  if (ai) {
+    const recentReplies = recentAssistantReplies(user, 6).map((reply) => `- ${compactText(reply, 180)}`).join('\n');
+    const retryPrompt = [
+      prompt,
+      '',
+      'Первый вариант слишком похож на недавние ответы. Ответь заново другими словами и с другой мыслью. Не комментируй сам повтор.',
+      `Не повторяй эти реплики:\n${recentReplies}`
+    ].join('\n');
+    const retry = removeRepeatedGreeting(user, await callAi(user, retryPrompt), text);
+    if (retry && !isRepeatedReply(user, retry)) return retry;
+  }
+
+  const localCandidates = [contextualLocalReply(user, text), localReply(user, text), localReply(user, text)].filter(Boolean);
+  return localCandidates
+    .map((reply) => removeRepeatedGreeting(user, reply, text))
+    .find((reply) => !isRepeatedReply(user, reply)) || localCandidates.at(-1) || 'рассказывай, что там у тебя';
 }
 
 function commandHelp() {
@@ -692,6 +712,7 @@ function commandHelp() {
     '/location Минск - запомнить город',
     '/stickers - стикеры',
     '/memory - что я помню',
+    '/status - версия, AI, память и авторежим',
     '/forget - очистить память'
   ];
 }
@@ -836,6 +857,58 @@ function sanitizeGeneratedText(value) {
   ];
   for (const pattern of forbidden) text = text.replace(pattern, ' ');
   return text.replace(/[ \t]{2,}/g, ' ').replace(/\s+([,.!?])/g, '$1').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function recentAssistantReplies(user, limit = 8) {
+  return (user.conversationLog || [])
+    .filter((entry) => entry.role === 'assistant' && entry.type !== 'proactive')
+    .slice(-limit)
+    .map((entry) => String(entry.content || '').replace(/^\[[^\]]+\]\s*/, '').trim())
+    .filter(Boolean);
+}
+
+function isRepeatedReply(user, candidate) {
+  const normalizedCandidate = normalizeText(candidate);
+  if (normalizedCandidate.length < 8) return false;
+  return recentAssistantReplies(user).some((previous) => {
+    const normalizedPrevious = normalizeText(previous);
+    if (!normalizedPrevious) return false;
+    if (normalizedCandidate === normalizedPrevious) return true;
+    if (Math.min(normalizedCandidate.length, normalizedPrevious.length) >= 28 &&
+        (normalizedCandidate.includes(normalizedPrevious) || normalizedPrevious.includes(normalizedCandidate))) return true;
+    return wordSimilarity(normalizedCandidate, normalizedPrevious) >= 0.72;
+  });
+}
+
+function wordSimilarity(left, right) {
+  const meaningful = (value) => new Set(value.split(/\s+/).filter((word) => word.length >= 3));
+  const leftWords = meaningful(left);
+  const rightWords = meaningful(right);
+  if (!leftWords.size || !rightWords.size) return 0;
+  const intersection = [...leftWords].filter((word) => rightWords.has(word)).length;
+  const union = new Set([...leftWords, ...rightWords]).size;
+  return intersection / union;
+}
+
+function buildStatusReport(user) {
+  normalizeUser(user);
+  const provider = env.GEMINI_API_KEY
+    ? `Gemini (${env.GEMINI_MODEL || 'gemini-flash-lite-latest'})`
+    : env.OPENAI_API_KEY
+      ? `OpenAI (${env.OPENAI_MODEL || 'gpt-4.1-mini'})`
+      : 'упрощённые локальные ответы';
+  const scheduleMode = user.proactiveTiming === 'fixed' ? 'вручную' : 'авто';
+  const memoryCount = (user.conversationLog || []).length;
+  const newsReady = Boolean((env.NEWS_FEEDS || '').trim());
+  return [
+    `Kcuni ${BUILD_VERSION}`,
+    `AI: ${provider}`,
+    `время: ${formatUserTime(user)} (${formatTimezone(user)})`,
+    `сама пишу: ${user.proactive === false ? 'выкл' : `вкл, ${scheduleMode} — ${getUserSchedule(user).join(', ')}`}`,
+    `новости: ${newsReady ? 'вкл' : 'не настроены'}`,
+    `память: ${memoryCount} реплик, ${(user.memorySummaries?.daily || []).length} дневных сводок`,
+    'сервис: на связи'
+  ].join('\n');
 }
 
 function pickByStyle(user, variants) {

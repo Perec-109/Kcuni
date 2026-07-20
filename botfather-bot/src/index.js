@@ -17,7 +17,8 @@ const USERS_FILE = new URL('../data/users.json', import.meta.url);
 const MAX_MESSAGES_PER_REPLY = Number(env.MAX_MESSAGES_PER_REPLY || 2);
 const DEFAULT_TIMEZONE = env.DEFAULT_TIMEZONE || 'Europe/Minsk';
 const DEFAULT_PROACTIVE_SCHEDULE = parseSchedule(env.PROACTIVE_SCHEDULE || '13:00,21:00,23:30');
-const BUILD_VERSION = '2026-07-21-status-repeat-1';
+const BUILD_VERSION = '2026-07-21-reminders-feedback-1';
+const REMINDER_MINUTE_MS = Math.max(25, Number(env.REMINDER_MINUTE_MS || 60_000));
 
 const styles = {
   cute: {
@@ -48,6 +49,7 @@ let offset = 0;
 
 console.log(`Kcuni BotFather bot started (${BUILD_VERSION}).`);
 startProactiveLoop();
+startReminderLoop();
 await startBot();
 
 async function startBot() {
@@ -76,6 +78,8 @@ async function configureTelegramMenu() {
     { command: 'news_week', description: 'Новости за последнюю неделю' },
     { command: 'memory', description: 'Посмотреть, что Kcuni помнит' },
     { command: 'stickers', description: 'Посмотреть память стикеров' },
+    { command: 'feedback', description: 'Что Kcuni выучила из твоих поправок' },
+    { command: 'reminders', description: 'Посмотреть таймеры и напоминания' },
     { command: 'status', description: 'Проверить работу Kcuni' },
     { command: 'help', description: 'Все команды Kcuni' }
   ];
@@ -323,6 +327,30 @@ async function handleMessage(message) {
     return;
   }
 
+  if (text === '/feedback') {
+    await send(chatId, buildFeedbackReport(user));
+    return;
+  }
+
+  if (text === '/feedback clear') {
+    user.responsePreferences = { avoid: [], liked: [] };
+    await saveUsers();
+    await send(chatId, 'очистила все сохранённые поправки');
+    return;
+  }
+
+  if (text === '/reminders') {
+    await send(chatId, buildReminderReport(user));
+    return;
+  }
+
+  if (text === '/reminders clear') {
+    user.reminders = [];
+    await saveUsers();
+    await send(chatId, 'все таймеры и напоминания отменила');
+    return;
+  }
+
   if (text === '/still' || text === '/style') {
     await send(chatId, [
       'стили:',
@@ -564,6 +592,29 @@ async function handleMessage(message) {
     return;
   }
 
+  const reminder = parseReminderRequest(user, text);
+  if (reminder) {
+    user.reminders.push(reminder);
+    user.reminders = user.reminders.slice(-50);
+    const confirmation = reminderConfirmation(user, reminder);
+    recordConversation(user, 'user', text, 'reminder-request');
+    recordConversation(user, 'assistant', confirmation, 'reminder-confirmation');
+    refreshMemorySummaries(user);
+    await saveUsers();
+    await send(chatId, confirmation);
+    return;
+  }
+
+  const feedbackReply = rememberResponseFeedback(user, text);
+  if (feedbackReply) {
+    recordConversation(user, 'user', text, 'feedback');
+    recordConversation(user, 'assistant', feedbackReply, 'feedback-reply');
+    refreshMemorySummaries(user);
+    await saveUsers();
+    await send(chatId, feedbackReply);
+    return;
+  }
+
   if (user.teaseIgnoreUntil && Date.now() < user.teaseIgnoreUntil && !text.startsWith('/')) {
     await maybeDelayTeaseReply(chatId, user, text);
     return;
@@ -639,6 +690,8 @@ async function generateReply(user, text) {
   const memory = buildMemoryContext(user);
   const plans = (user.plans || []).slice(-10).join('\n');
   const mood = inferConversationMood(user, text);
+  const avoidedReplies = (user.responsePreferences?.avoid || []).slice(-8).map((item) => `- ${compactText(item, 220)}`).join('\n');
+  const likedReplies = (user.responsePreferences?.liked || []).slice(-5).map((item) => `- ${compactText(item, 220)}`).join('\n');
   const prompt = [
     'Ты Kcuni, девушка в Telegram. Держи образ живого собеседника, не называй себя ИИ, GPT, моделью или ботом без прямого вопроса.',
     style.prompt,
@@ -656,6 +709,8 @@ async function generateReply(user, text) {
     'Не спрашивай постоянно "что ты хочешь услышать". Лучше сама предложи реплику, шутку, вопрос или маленькую игру.',
     'Не притворяйся, что отправила картинку, видео, файл или стикер. Если медиа реально отправляется, это делает код отдельно.',
     'Если не знаешь факт, не выдумывай.',
+    avoidedReplies ? `Пользователь уже просил не повторять эти формулировки и их манеру:\n${avoidedReplies}` : '',
+    likedReplies ? `Пользователю нравились такие примеры. Бери общий вайб, но не копируй дословно:\n${likedReplies}` : '',
     user.hadConversationToday
       ? 'Вы уже общались сегодня. Не начинай ответ с "привет", "приветик", "здравствуй" или повторного знакомства. Сразу продолжай текущий разговор.'
       : 'Если это первое общение за день, короткое естественное приветствие допустимо, но не обязательно.',
@@ -712,6 +767,10 @@ function commandHelp() {
     '/location Минск - запомнить город',
     '/stickers - стикеры',
     '/memory - что я помню',
+    '/feedback - что я выучила из твоих поправок',
+    '/feedback clear - забыть все поправки',
+    '/reminders - таймеры и точные напоминания',
+    '/reminders clear - отменить все напоминания',
     '/status - версия, AI, память и авторежим',
     '/forget - очистить память'
   ];
@@ -870,13 +929,20 @@ function recentAssistantReplies(user, limit = 8) {
 function isRepeatedReply(user, candidate) {
   const normalizedCandidate = normalizeText(candidate);
   if (normalizedCandidate.length < 8) return false;
-  return recentAssistantReplies(user).some((previous) => {
+  const repeatsRecent = recentAssistantReplies(user).some((previous) => {
     const normalizedPrevious = normalizeText(previous);
     if (!normalizedPrevious) return false;
     if (normalizedCandidate === normalizedPrevious) return true;
     if (Math.min(normalizedCandidate.length, normalizedPrevious.length) >= 28 &&
         (normalizedCandidate.includes(normalizedPrevious) || normalizedPrevious.includes(normalizedCandidate))) return true;
     return wordSimilarity(normalizedCandidate, normalizedPrevious) >= 0.72;
+  });
+  if (repeatsRecent) return true;
+  return (user.responsePreferences?.avoid || []).some((avoided) => {
+    const normalizedAvoided = normalizeText(avoided);
+    if (!normalizedAvoided) return false;
+    if (normalizedCandidate.includes(normalizedAvoided) || normalizedAvoided.includes(normalizedCandidate)) return true;
+    return wordSimilarity(normalizedCandidate, normalizedAvoided) >= 0.52;
   });
 }
 
@@ -907,7 +973,50 @@ function buildStatusReport(user) {
     `сама пишу: ${user.proactive === false ? 'выкл' : `вкл, ${scheduleMode} — ${getUserSchedule(user).join(', ')}`}`,
     `новости: ${newsReady ? 'вкл' : 'не настроены'}`,
     `память: ${memoryCount} реплик, ${(user.memorySummaries?.daily || []).length} дневных сводок`,
+    `обучение ответов: не использовать ${(user.responsePreferences?.avoid || []).length}, удачных примеров ${(user.responsePreferences?.liked || []).length}`,
+    `активные напоминания: ${user.reminders.filter((reminder) => !reminder.sentAt).length}`,
     'сервис: на связи'
+  ].join('\n');
+}
+
+function rememberResponseFeedback(user, text) {
+  const normalized = normalizeText(text);
+  const negative = /(не говори так|не пиши так|не отвечай так|убери .{0,20}фраз|не повтор|опять .{0,20}повтор|тупой ответ|тупо ответил)/.test(normalized);
+  const positive = /(вот так лучше|так лучше|вот так норм|так нормально|мне так нравит|хороший ответ|нормально ответила)/.test(normalized);
+  if (!negative && !positive) return '';
+
+  normalizeUser(user);
+  const quoted = String(text).match(/[«“"]([^\u00bb”"]{3,220})[»”"]/u)?.[1]?.trim();
+  const previous = recentAssistantReplies(user, 1).at(-1);
+  const example = compactText(quoted || previous || '', 300);
+  if (!example) return 'скажи или цитируй, какую именно фразу мне запомнить';
+
+  if (negative) {
+    if (!user.responsePreferences.avoid.includes(example)) user.responsePreferences.avoid.push(example);
+    user.responsePreferences.avoid = user.responsePreferences.avoid.slice(-20);
+    user.responsePreferences.liked = user.responsePreferences.liked.filter((item) => item !== example);
+    return 'запомнила. эту формулировку и похожую манеру больше не буду повторять';
+  }
+
+  if (!user.responsePreferences.liked.includes(example)) user.responsePreferences.liked.push(example);
+  user.responsePreferences.liked = user.responsePreferences.liked.slice(-12);
+  user.responsePreferences.avoid = user.responsePreferences.avoid.filter((item) => item !== example);
+  return 'вот, так бы сразу) запомнила этот вайб';
+}
+
+function buildFeedbackReport(user) {
+  normalizeUser(user);
+  const avoid = user.responsePreferences.avoid;
+  const liked = user.responsePreferences.liked;
+  if (!avoid.length && !liked.length) {
+    return 'пока поправок нет. можешь написать «не отвечай так» или «вот так лучше»';
+  }
+  return [
+    `не использовать: ${avoid.length}`,
+    ...avoid.slice(-4).map((item) => `• ${compactText(item, 150)}`),
+    `удачные примеры: ${liked.length}`,
+    ...liked.slice(-3).map((item) => `• ${compactText(item, 150)}`),
+    'очистить: /feedback clear'
   ].join('\n');
 }
 
@@ -1298,6 +1407,49 @@ function startProactiveLoop() {
   setInterval(() => {
     runProactiveCycle().catch((error) => console.error('Proactive cycle failed:', error.message));
   }, checkMs);
+}
+
+function startReminderLoop() {
+  const checkMs = Math.max(25, Number(env.REMINDER_CHECK_MS || 30_000));
+  setTimeout(() => runReminderCycle().catch((error) => console.error('Reminder cycle failed:', error.message)), Math.min(1500, checkMs));
+  setInterval(() => {
+    runReminderCycle().catch((error) => console.error('Reminder cycle failed:', error.message));
+  }, checkMs);
+}
+
+async function runReminderCycle(now = Date.now()) {
+  for (const user of Object.values(users)) {
+    normalizeUser(user);
+    if (!user.chatId) continue;
+    const due = user.reminders
+      .filter((reminder) => !reminder.sentAt && Number(reminder.dueAt) <= now)
+      .sort((left, right) => left.dueAt - right.dueAt);
+    for (const reminder of due) {
+      try {
+        const message = reminderMessage(reminder, now);
+        await send(user.chatId, message);
+        reminder.sentAt = Date.now();
+        recordConversation(user, 'assistant', message, 'reminder');
+        refreshMemorySummaries(user);
+        await saveUsers();
+      } catch (error) {
+        console.error('Reminder send failed:', error.message);
+      }
+    }
+    user.reminders = user.reminders.filter((reminder) => !reminder.sentAt || now - reminder.sentAt < 30 * 24 * 60 * 60 * 1000);
+  }
+}
+
+function reminderMessage(reminder, now = Date.now()) {
+  const late = reminder.windowEndAt && now > reminder.windowEndAt + 60_000;
+  if (late) return 'эй, я тут. ты просил меня написать — чуть задержалась, но не забыла)';
+  const variants = [
+    'эй, я тут) ты просил меня написать примерно сейчас',
+    'ну что, время пришло) я обещала написать — пишу',
+    'тук-тук) таймер сработал, как ты там?'
+  ];
+  const index = Number.parseInt(createHash('sha256').update(reminder.id).digest('hex').slice(0, 2), 16) % variants.length;
+  return variants[index];
 }
 
 async function runProactiveCycle(now = Date.now()) {
@@ -1988,6 +2140,10 @@ function normalizeUser(user) {
   user.proactiveSchedule ||= [...DEFAULT_PROACTIVE_SCHEDULE];
   user.proactiveTiming ||= schedulesEqual(user.proactiveSchedule, DEFAULT_PROACTIVE_SCHEDULE) ? 'auto' : 'fixed';
   user.sentNewsLinks ||= [];
+  user.responsePreferences ||= { avoid: [], liked: [] };
+  user.responsePreferences.avoid ||= [];
+  user.responsePreferences.liked ||= [];
+  user.reminders ||= [];
   if (!user.timezone && !Number.isFinite(user.timezoneOffsetMinutes)) user.timezone = DEFAULT_TIMEZONE;
   return user;
 }
@@ -2132,6 +2288,104 @@ function buildAutomaticSchedule(user, timestamp = Date.now()) {
 
 function schedulesEqual(left, right) {
   return parseSchedule(Array.isArray(left) ? left.join(',') : left).join(',') === parseSchedule(Array.isArray(right) ? right.join(',') : right).join(',');
+}
+
+function parseReminderRequest(user, text, now = Date.now()) {
+  const normalized = normalizeText(text);
+  if (!/(напиши мне|напомни мне|напомни|пни меня)/.test(normalized)) return null;
+
+  const relative = normalized.match(/через\s+(?:(минут\S*|час\S*)\s+)?(\d{1,3})(?:\s*[-–—]\s*(\d{1,3}))?\s*(минут\S*|мин\S*|час\S*)?/i);
+  if (relative) {
+    const unit = `${relative[1] || ''} ${relative[4] || ''}`;
+    const multiplier = /час/.test(unit) ? 60 : 1;
+    const minimum = Math.max(1, Number(relative[2]) * multiplier);
+    const maximum = Math.max(minimum, Number(relative[3] || relative[2]) * multiplier);
+    const selectedMinutes = minimum + Math.floor(Math.random() * (maximum - minimum + 1));
+    return createReminder(text, now + selectedMinutes * REMINDER_MINUTE_MS, now + maximum * REMINDER_MINUTE_MS, {
+      kind: 'relative', minimumMinutes: minimum, maximumMinutes: maximum, selectedMinutes
+    });
+  }
+
+  const absolute = normalized.match(/(сегодня|завтра)\s+(?:в\s*)?(\d{1,2})[:.](\d{2})(?:\s*[-–—]\s*(?:(\d{1,2})[:.])?(\d{2}))?/i);
+  if (!absolute) return null;
+  const startHour = Number(absolute[2]);
+  const startMinute = Number(absolute[3]);
+  const endHour = Number(absolute[4] || startHour);
+  const endMinute = Number(absolute[5] || startMinute);
+  if (startHour > 23 || endHour > 23 || startMinute > 59 || endMinute > 59) return null;
+
+  const today = localDateKey(user, now);
+  const dateKey = absolute[1] === 'завтра' ? addLocalDays(today, 1) : today;
+  const startAt = localDateTimeToTimestamp(user, dateKey, startHour, startMinute);
+  let endAt = localDateTimeToTimestamp(user, dateKey, endHour, endMinute);
+  if (endAt < startAt) endAt = startAt;
+  if (endAt < now) return null;
+  const selectedAt = startAt + Math.floor(Math.random() * (endAt - startAt + 1));
+  return createReminder(text, Math.max(now + 1000, selectedAt), endAt, {
+    kind: 'absolute', dateKey, start: `${padTime(startHour)}:${padTime(startMinute)}`, end: `${padTime(endHour)}:${padTime(endMinute)}`
+  });
+}
+
+function createReminder(request, dueAt, windowEndAt, details) {
+  return {
+    id: createHash('sha256').update(`${Date.now()}-${Math.random()}-${request}`).digest('hex').slice(0, 16),
+    request: compactText(request, 300),
+    createdAt: Date.now(),
+    dueAt: Math.round(dueAt),
+    windowEndAt: Math.round(windowEndAt),
+    ...details
+  };
+}
+
+function reminderConfirmation(user, reminder) {
+  if (reminder.kind === 'relative') {
+    const range = reminder.minimumMinutes === reminder.maximumMinutes
+      ? `через ${reminder.selectedMinutes} мин.`
+      : `в промежутке ${reminder.minimumMinutes}–${reminder.maximumMinutes} мин. (таймер на ${reminder.selectedMinutes} мин.)`;
+    return `поставила таймер: напишу ${range}`;
+  }
+  const window = reminder.start === reminder.end ? reminder.start : `${reminder.start}–${reminder.end}`;
+  return `запомнила. напишу ${reminder.dateKey} в ${window} (${formatTimezone(user)})`;
+}
+
+function buildReminderReport(user, now = Date.now()) {
+  normalizeUser(user);
+  const pending = user.reminders.filter((reminder) => !reminder.sentAt && reminder.dueAt > now - 24 * 60 * 60 * 1000).sort((left, right) => left.dueAt - right.dueAt);
+  if (!pending.length) return 'активных таймеров нет. напиши: «напиши мне через 15–20 минут»';
+  return [
+    'активные напоминания:',
+    ...pending.slice(0, 10).map((reminder, index) => `${index + 1}. ${formatUserDateTime(user, reminder.dueAt)} — ${compactText(reminder.request, 120)}`),
+    'отменить все: /reminders clear'
+  ].join('\n');
+}
+
+function localDateTimeToTimestamp(user, dateKey, hour, minute) {
+  const [year, month, day] = dateKey.split('-').map(Number);
+  const desired = Date.UTC(year, month - 1, day, hour, minute);
+  if (!user.timezone) return desired - Number(user.timezoneOffsetMinutes || 0) * 60_000;
+  let guess = desired;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const parts = getUserDateParts(user, guess);
+    const [actualYear, actualMonth, actualDay] = parts.dateKey.split('-').map(Number);
+    const actual = Date.UTC(actualYear, actualMonth - 1, actualDay, parts.hour, parts.minute);
+    guess += desired - actual;
+  }
+  return guess;
+}
+
+function addLocalDays(dateKey, days) {
+  const date = new Date(`${dateKey}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function formatUserDateTime(user, timestamp) {
+  const parts = getUserDateParts(user, timestamp);
+  return `${parts.dateKey} ${padTime(parts.hour)}:${padTime(parts.minute)}`;
+}
+
+function padTime(value) {
+  return String(value).padStart(2, '0');
 }
 
 function findDueScheduleSlot(user, timestamp) {

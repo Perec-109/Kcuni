@@ -4,6 +4,9 @@ Kcuni is a Telegram character bot with conversation styles, per-user memory,
 media handling, contextual news and proactive messages. In automatic mode it
 chooses different local times each day and can connect a recent conversation
 topic with a fresh article, a short summary and the full source link.
+It also learns from direct response feedback and supports guaranteed one-off
+timers such as `напиши мне через 15–20 минут` or
+`напиши мне завтра в 21:30–21:35` in the user's timezone.
 
 - [Project site](https://perec-109.github.io/Kcuni/)
 - Bot source and local setup: [`botfather-bot/`](botfather-bot/)

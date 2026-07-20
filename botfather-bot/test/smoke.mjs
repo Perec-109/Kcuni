@@ -69,6 +69,8 @@ const child = spawn(process.execPath, ['src/index.js'], {
     NEWS_FEEDS: `http://127.0.0.1:${mockPort}/rss`,
     PORT: String(appPort),
     PROACTIVE_CHECK_MINUTES: '9999',
+    REMINDER_MINUTE_MS: '500',
+    REMINDER_CHECK_MS: '25',
     TYPING_MIN_MS: '0', TYPING_MAX_MS: '0', TYPING_BASE_MS: '0',
     TYPING_PER_CHAR_MS: '0', TYPING_PER_WORD_MS: '0'
   },
@@ -87,13 +89,13 @@ try {
   assert.ok(commandMenu);
   assert.deepEqual(
     commandMenu.body.commands.map(({ command }) => command),
-    ['style', 'timezone', 'location', 'schedule', 'proactive', 'headline', 'news_week', 'memory', 'stickers', 'status', 'help']
+    ['style', 'timezone', 'location', 'schedule', 'proactive', 'headline', 'news_week', 'memory', 'stickers', 'feedback', 'reminders', 'status', 'help']
   );
   assert.ok(calls.some((call) => call.method === 'setChatMenuButton' && call.body.menu_button?.type === 'commands'));
 
   const health = await fetch(`http://127.0.0.1:${appPort}/healthz`);
   assert.equal(health.status, 200);
-  assert.deepEqual(await health.json(), { ok: true, service: 'kcuni-bot', version: '2026-07-21-status-repeat-1' });
+  assert.deepEqual(await health.json(), { ok: true, service: 'kcuni-bot', version: '2026-07-21-reminders-feedback-1' });
 
   const unauthorized = await fetch(`http://127.0.0.1:${appPort}/telegram/webhook`, { method: 'POST', body: '{}' });
   assert.equal(unauthorized.status, 401);
@@ -117,13 +119,33 @@ try {
   await waitForMessageContaining('команды Kcuni', 5000);
 
   await postUpdate({ text: '/status@kcuni_smoke_bot' });
-  await waitForMessageContaining('Kcuni 2026-07-21-status-repeat-1', 5000);
+  await waitForMessageContaining('Kcuni 2026-07-21-reminders-feedback-1', 5000);
 
   await postUpdate({ text: '/unknown_command@kcuni_smoke_bot' });
   await waitForMessageContaining('не знаю такую команду', 5000);
 
   await postUpdate({ text: 'я живу в Минске и люблю космос' });
   await waitForMessageContaining('продолжаю без приветствия', 5000);
+
+  await postUpdate({ text: 'не отвечай так' });
+  await waitForMessageContaining('эту формулировку', 5000);
+
+  await postUpdate({ text: '/feedback' });
+  await waitForMessageContaining('не использовать: 1', 5000);
+
+  await postUpdate({ text: 'напиши мне через 1 минуту' });
+  await waitForMessageContaining('поставила таймер', 5000);
+  const reminderMessageCount = sentMessages().length;
+  await waitFor(() => sentMessages().slice(reminderMessageCount).some((message) => /ты просил|обещала|таймер сработал/.test(message)), 5000);
+
+  await postUpdate({ text: 'напиши мне завтра в 21:30-21:35' });
+  await waitForMessageContaining('21:30–21:35', 5000);
+
+  await postUpdate({ text: '/reminders' });
+  await waitForMessageContaining('активные напоминания', 5000);
+
+  await postUpdate({ text: '/reminders clear' });
+  await waitForMessageContaining('все таймеры', 5000);
 
   await postUpdate({ text: '/proactive now' });
   await waitForMessageContaining('https://example.com/science', 5000);

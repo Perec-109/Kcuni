@@ -79,6 +79,14 @@ child.stderr.on('data', (chunk) => { output += chunk; });
 try {
   await waitFor(() => output.includes('Webhook enabled'), 5000);
 
+  const commandMenu = calls.find((call) => call.method === 'setMyCommands');
+  assert.ok(commandMenu);
+  assert.deepEqual(
+    commandMenu.body.commands.map(({ command }) => command),
+    ['style', 'timezone', 'location', 'schedule', 'proactive', 'headline', 'news_week', 'memory', 'stickers', 'help']
+  );
+  assert.ok(calls.some((call) => call.method === 'setChatMenuButton' && call.body.menu_button?.type === 'commands'));
+
   const health = await fetch(`http://127.0.0.1:${appPort}/healthz`);
   assert.equal(health.status, 200);
   assert.deepEqual(await health.json(), { ok: true, service: 'kcuni-bot' });
@@ -102,6 +110,12 @@ try {
   await waitForMessageContaining('не присылай мне такое', 5000);
 
   await postUpdate({ text: '/news week' });
+  await waitForMessageContaining('сводка новостей за неделю', 5000);
+
+  await postUpdate({ text: '/style' });
+  await waitForMessageContaining('/style cute', 5000);
+
+  await postUpdate({ text: '/news_week' });
   await waitForMessageContaining('сводка новостей за неделю', 5000);
 
   await postUpdate({ text: '/memory' });

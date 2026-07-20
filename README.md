@@ -17,7 +17,8 @@ to long polling.
 3. Approve the Blueprint and set the required `BOT_TOKEN` secret.
 4. To enable AI replies, also set `GEMINI_API_KEY` (optional).
 5. Deploy. The service registers its Render URL as the Telegram webhook
-   automatically and exposes `/healthz` for health checks.
+   automatically, replaces the Telegram website menu button with Kcuni's
+   command list, and exposes `/healthz` for health checks.
 
 Do not commit bot tokens or API keys to GitHub.
 

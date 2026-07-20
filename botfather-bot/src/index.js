@@ -51,15 +51,36 @@ await startBot();
 
 async function startBot() {
   const publicUrl = String(env.WEBHOOK_URL || env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
+  const bot = await tg('getMe', {});
+  await configureTelegramMenu();
+
   if (publicUrl) {
-    await startWebhookServer(publicUrl);
+    await startWebhookServer(publicUrl, bot);
     return;
   }
 
   await tg('deleteWebhook', { drop_pending_updates: false });
-  const bot = await tg('getMe', {});
   console.log(`Long polling enabled for @${bot.username}.`);
   await pollUpdates();
+}
+
+async function configureTelegramMenu() {
+  const commands = [
+    { command: 'style', description: 'Настроить, как Kcuni отвечает' },
+    { command: 'timezone', description: 'Указать часовой пояс' },
+    { command: 'location', description: 'Указать город' },
+    { command: 'schedule', description: 'Время самостоятельных сообщений' },
+    { command: 'proactive', description: 'Включить или выключить сообщения от Kcuni' },
+    { command: 'headline', description: 'Короткая сводка свежих новостей' },
+    { command: 'news_week', description: 'Новости за последнюю неделю' },
+    { command: 'memory', description: 'Посмотреть, что Kcuni помнит' },
+    { command: 'stickers', description: 'Посмотреть память стикеров' },
+    { command: 'help', description: 'Все команды Kcuni' }
+  ];
+
+  await tg('setMyCommands', { commands });
+  await tg('setChatMenuButton', { menu_button: { type: 'commands' } });
+  console.log('Telegram menu button configured with bot commands.');
 }
 
 async function pollUpdates() {
@@ -86,7 +107,7 @@ async function handleUpdate(update) {
   if (update?.message) await handleMessage(update.message);
 }
 
-async function startWebhookServer(publicUrl) {
+async function startWebhookServer(publicUrl, bot) {
   const port = Number(env.PORT || 10000);
   const webhookPath = '/telegram/webhook';
   const webhookSecret = env.WEBHOOK_SECRET || createHash('sha256').update(BOT_TOKEN).digest('hex');
@@ -128,7 +149,6 @@ async function startWebhookServer(publicUrl) {
     server.listen(port, '0.0.0.0', resolve);
   });
 
-  const bot = await tg('getMe', {});
   await tg('setWebhook', {
     url: `${publicUrl}${webhookPath}`,
     secret_token: webhookSecret,
@@ -296,18 +316,18 @@ async function handleMessage(message) {
     return;
   }
 
-  if (text === '/still') {
+  if (text === '/still' || text === '/style') {
     await send(chatId, [
       'стили:',
-      '/still cute - няшная',
-      '/still calm - спокойная с лёгким флиртом',
-      '/still playful - игривая',
-      '/still serious - серьёзная'
+      '/style cute - няшная',
+      '/style calm - спокойная с лёгким флиртом',
+      '/style playful - игривая',
+      '/style serious - серьёзная'
     ]);
     return;
   }
 
-  if (text.startsWith('/still ')) {
+  if (text.startsWith('/still ') || text.startsWith('/style ')) {
     const style = text.split(/\s+/)[1]?.toLowerCase();
     if (!styles[style]) {
       await send(chatId, 'не знаю такой стиль. есть: cute, calm, playful, serious');
@@ -449,12 +469,12 @@ async function handleMessage(message) {
     return;
   }
 
-  if (text === '/news' || text === '/new') {
+  if (text === '/news' || text === '/new' || text === '/headline') {
     await handleNews(chatId, user, user.newsTopic || 'mixed', 1);
     return;
   }
 
-  if (text === '/week' || /^\/(news|new)\s+(week|7d|недел)/i.test(text) || /новост\S*\s+.*(?:за\s+)?(?:последн\S*\s+)?недел/i.test(text)) {
+  if (text === '/week' || text === '/news_week' || /^\/(news|new)\s+(week|7d|недел)/i.test(text) || /новост\S*\s+.*(?:за\s+)?(?:последн\S*\s+)?недел/i.test(text)) {
     await handleNews(chatId, user, user.newsTopic || 'mixed', 7);
     return;
   }
@@ -614,9 +634,9 @@ function commandHelp() {
     '/start - запустить',
     '/help - список команд',
     '/cute /calm /playful /serious - быстро сменить стиль',
-    '/still calm - сменить стиль старым способом',
-    '/new или /news - новости',
-    '/news week или /week - сводка за неделю',
+    '/style calm - изменить, как я отвечаю',
+    '/headline - короткая сводка свежих новостей',
+    '/news_week - сводка за неделю',
     '/pic или /cat - прислать милую картинку',
     '/video или /catvideo - прислать короткое видео',
     '/topics - выбрать тип новостей',

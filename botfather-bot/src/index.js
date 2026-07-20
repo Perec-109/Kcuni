@@ -15,6 +15,8 @@ const API = `${env.TELEGRAM_API_BASE || 'https://api.telegram.org'}/bot${BOT_TOK
 const DATA_DIR = new URL('../data/', import.meta.url);
 const USERS_FILE = new URL('../data/users.json', import.meta.url);
 const MAX_MESSAGES_PER_REPLY = Number(env.MAX_MESSAGES_PER_REPLY || 2);
+const DEFAULT_TIMEZONE = env.DEFAULT_TIMEZONE || 'Europe/Minsk';
+const DEFAULT_PROACTIVE_SCHEDULE = parseSchedule(env.PROACTIVE_SCHEDULE || '13:00,21:00,23:30');
 
 const styles = {
   cute: {
@@ -156,16 +158,52 @@ function safeEqual(left, right) {
 async function handleMessage(message) {
   const chatId = message.chat.id;
   const user = getUser(chatId, message.from);
+  const previousSeenAt = user.lastSeenAt || 0;
+  user.hadConversationToday = previousSeenAt > 0 && localDateKey(user, previousSeenAt) === localDateKey(user, Date.now());
 
   if (message.sticker?.file_id) {
+    user.lastSeenAt = Date.now();
+    user.chatId = chatId;
     user.stickers ||= [];
     if (!user.stickers.includes(message.sticker.file_id)) {
       user.stickers.push(message.sticker.file_id);
       user.stickers = user.stickers.slice(-30);
-      await saveUsers();
     }
-    await maybeSendSticker(chatId, user, 0.65, 'стикер');
-    await send(chatId, localReply(user, 'стикер'));
+    const reply = await understandSticker(user, message.sticker);
+    user.stickerMemories ||= [];
+    user.stickerMemories.push({
+      emoji: message.sticker.emoji || '',
+      setName: message.sticker.set_name || '',
+      reaction: reply.slice(0, 240),
+      seenAt: new Date().toISOString()
+    });
+    user.stickerMemories = user.stickerMemories.slice(-20);
+    remember(user, `[стикер ${message.sticker.emoji || ''}] ${reply}`);
+    recordConversation(user, 'user', `[стикер ${message.sticker.emoji || ''}]`, 'sticker');
+    recordConversation(user, 'assistant', reply, 'sticker-reaction');
+    refreshMemorySummaries(user);
+    await saveUsers();
+    await send(chatId, splitTelegram(reply));
+    await maybeSendSticker(chatId, user, 0.12, `стикер ${reply}`);
+    return;
+  }
+
+  if (message.location) {
+    user.lastSeenAt = Date.now();
+    user.chatId = chatId;
+    user.location = {
+      latitude: message.location.latitude,
+      longitude: message.location.longitude,
+      label: user.location?.label || 'геопозиция из Telegram'
+    };
+    if (!user.timezone) {
+      user.timezoneOffsetMinutes = longitudeToOffsetMinutes(message.location.longitude);
+    }
+    await saveUsers();
+    await send(chatId, [
+      'геопозицию запомнила)',
+      `часовой пояс пока определила примерно как ${formatTimezone(user)}. для точности напиши /timezone Europe/Minsk`
+    ]);
     return;
   }
 
@@ -177,6 +215,10 @@ async function handleMessage(message) {
     remember(user, `[photo]${caption}`);
     await saveUsers();
     const reply = await describeTelegramFile(user, fileId, 'photo', caption);
+    recordConversation(user, 'user', `[фото]${caption}`, 'photo');
+    recordConversation(user, 'assistant', reply, 'photo-reaction');
+    refreshMemorySummaries(user);
+    await saveUsers();
     await send(chatId, splitTelegram(reply));
     await maybeSendSticker(chatId, user, 0.08, 'photo');
     return;
@@ -188,6 +230,10 @@ async function handleMessage(message) {
     remember(user, '[voice message]');
     await saveUsers();
     const reply = await describeTelegramFile(user, message.voice.file_id, 'voice', '');
+    recordConversation(user, 'user', '[голосовое]', 'voice');
+    recordConversation(user, 'assistant', reply, 'voice-reaction');
+    refreshMemorySummaries(user);
+    await saveUsers();
     await send(chatId, splitTelegram(reply));
     await maybeSendSticker(chatId, user, 0.06, 'voice');
     return;
@@ -199,6 +245,10 @@ async function handleMessage(message) {
     remember(user, '[video note]');
     await saveUsers();
     const reply = await describeTelegramFile(user, message.video_note.file_id, 'video_note', '');
+    recordConversation(user, 'user', '[видеокружок]', 'video-note');
+    recordConversation(user, 'assistant', reply, 'video-note-reaction');
+    refreshMemorySummaries(user);
+    await saveUsers();
     await send(chatId, splitTelegram(reply));
     await maybeSendSticker(chatId, user, 0.06, 'video_note');
     return;
@@ -209,6 +259,26 @@ async function handleMessage(message) {
 
   user.lastSeenAt = Date.now();
   user.chatId = chatId;
+
+  const rememberedCity = detectCityStatement(text);
+  if (rememberedCity) setUserCity(user, rememberedCity);
+
+  if (isGreetingRequest(text) && user.hadConversationToday) {
+    const repeatedQuickly = user.lastGreetingRequestAt && Date.now() - user.lastGreetingRequestAt < 20 * 60 * 1000;
+    user.greetingRequestCount = repeatedQuickly ? (user.greetingRequestCount || 0) + 1 : 1;
+    user.lastGreetingRequestAt = Date.now();
+    const greetings = ['привет)', 'здорово, как ты?', 'привет ещё раз)'];
+    const greetingReply = user.greetingRequestCount >= 2
+      ? greetings[Math.floor(Math.random() * greetings.length)]
+      : 'мы же сегодня уже общались) зачем ещё раз здороваться?';
+    if (user.greetingRequestCount >= 2) user.greetingRequestCount = 0;
+    recordConversation(user, 'user', text);
+    recordConversation(user, 'assistant', greetingReply);
+    refreshMemorySummaries(user);
+    await saveUsers();
+    await send(chatId, greetingReply);
+    return;
+  }
 
   if (text === '/start') {
     await send(chatId, [
@@ -264,6 +334,66 @@ async function handleMessage(message) {
     return;
   }
 
+  if (text === '/timezone') {
+    await send(chatId, [
+      `твой часовой пояс: ${formatTimezone(user)}`,
+      'изменить: /timezone Europe/Minsk или /timezone +3'
+    ]);
+    return;
+  }
+
+  if (text.startsWith('/timezone ')) {
+    const requested = text.slice('/timezone '.length).trim();
+    const timezone = parseTimezone(requested);
+    if (!timezone) {
+      await send(chatId, 'не поняла пояс. пример: /timezone Europe/Minsk или /timezone +3');
+      return;
+    }
+    Object.assign(user, timezone);
+    await saveUsers();
+    await send(chatId, `запомнила: ${formatTimezone(user)}. у тебя сейчас ${formatUserTime(user)}`);
+    return;
+  }
+
+  if (text === '/location') {
+    await send(chatId, [
+      user.location?.label ? `я помню: ты живёшь — ${user.location.label}` : 'город пока не знаю',
+      'напиши /location Минск или отправь геопозицию скрепкой Telegram'
+    ]);
+    return;
+  }
+
+  if (text.startsWith('/location ')) {
+    const city = text.slice('/location '.length).trim();
+    setUserCity(user, city);
+    await saveUsers();
+    await send(chatId, user.timezone
+      ? `запомнила: ${city}. часовой пояс ${formatTimezone(user)}`
+      : `запомнила город: ${city}. часовой пояс лучше указать отдельно: /timezone Europe/Minsk`);
+    return;
+  }
+
+  if (text === '/schedule') {
+    await send(chatId, [
+      `сама пишу по твоему времени: ${getUserSchedule(user).join(', ')}`,
+      'изменить: /schedule 13:00,21:00,23:30'
+    ]);
+    return;
+  }
+
+  if (text.startsWith('/schedule ')) {
+    const schedule = parseSchedule(text.slice('/schedule '.length));
+    if (!schedule.length) {
+      await send(chatId, 'не поняла расписание. пример: /schedule 13:00,21:00,23:30');
+      return;
+    }
+    user.proactiveSchedule = schedule;
+    user.proactive = true;
+    await saveUsers();
+    await send(chatId, `договорились, буду сама писать примерно в ${schedule.join(', ')} (${formatTimezone(user)})`);
+    return;
+  }
+
   if (text === '/normal') {
     user.teaseIgnoreUntil = 0;
     user.dialogue ||= {};
@@ -282,13 +412,14 @@ async function handleMessage(message) {
   }
 
   if (text === '/memory') {
-    const memory = user.memory.length ? user.memory.slice(-8).map((item) => `- ${item}`).join('\n') : 'пока почти ничего не помню';
-    await send(chatId, memory);
+    await send(chatId, buildMemoryReport(user));
     return;
   }
 
   if (text === '/forget') {
     user.memory = [];
+    user.conversationLog = [];
+    user.memorySummaries = { daily: [], weekly: [], monthly: [] };
     await saveUsers();
     await send(chatId, 'окей, память по тебе очистила');
     return;
@@ -319,7 +450,12 @@ async function handleMessage(message) {
   }
 
   if (text === '/news' || text === '/new') {
-    await handleNews(chatId, user, user.newsTopic || 'mixed');
+    await handleNews(chatId, user, user.newsTopic || 'mixed', 1);
+    return;
+  }
+
+  if (text === '/week' || /^\/(news|new)\s+(week|7d|недел)/i.test(text) || /новост\S*\s+.*(?:за\s+)?(?:последн\S*\s+)?недел/i.test(text)) {
+    await handleNews(chatId, user, user.newsTopic || 'mixed', 7);
     return;
   }
 
@@ -385,10 +521,13 @@ async function handleMessage(message) {
   }
 
   updateAutoMemory(user, text);
+  recordConversation(user, 'user', text);
 
   const intenseReply = maybeHandleIntenseFlirt(user, text);
   if (intenseReply) {
     remember(user, text);
+    recordConversation(user, 'assistant', intenseReply);
+    refreshMemorySummaries(user);
     await saveUsers();
     await send(chatId, splitTelegram(intenseReply));
     return;
@@ -396,6 +535,8 @@ async function handleMessage(message) {
 
   const planReply = maybeReplyWithPlans(user, text);
   if (planReply) {
+    recordConversation(user, 'assistant', planReply);
+    refreshMemorySummaries(user);
     await saveUsers();
     await send(chatId, splitTelegram(planReply));
     return;
@@ -407,6 +548,9 @@ async function handleMessage(message) {
     setTimeout(async () => {
       try {
         const delayedReply = await generateReply(user, text);
+        recordConversation(user, 'assistant', delayedReply);
+        refreshMemorySummaries(user);
+        await saveUsers();
         await send(chatId, splitTelegram(delayedReply));
       } catch (error) {
         console.error('Natural delayed reply failed:', error.message);
@@ -417,6 +561,8 @@ async function handleMessage(message) {
 
   remember(user, text);
   const reply = await generateReply(user, text);
+  recordConversation(user, 'assistant', reply);
+  refreshMemorySummaries(user);
   await saveUsers();
   await send(chatId, splitTelegram(reply));
   await maybeSendContextMedia(chatId, user, text, reply);
@@ -425,7 +571,7 @@ async function handleMessage(message) {
 
 async function generateReply(user, text) {
   const style = styles[user.style] || styles.cute;
-  const memory = user.memory.slice(-10).join('\n');
+  const memory = buildMemoryContext(user);
   const plans = (user.plans || []).slice(-10).join('\n');
   const mood = inferConversationMood(user, text);
   const prompt = [
@@ -442,6 +588,11 @@ async function generateReply(user, text) {
     'Не спрашивай постоянно "что ты хочешь услышать". Лучше сама предложи реплику, шутку, вопрос или маленькую игру.',
     'Не притворяйся, что отправила картинку, видео, файл или стикер. Если медиа реально отправляется, это делает код отдельно.',
     'Если не знаешь факт, не выдумывай.',
+    user.hadConversationToday
+      ? 'Вы уже общались сегодня. Не начинай ответ с "привет", "приветик", "здравствуй" или повторного знакомства. Сразу продолжай текущий разговор.'
+      : 'Если это первое общение за день, короткое естественное приветствие допустимо, но не обязательно.',
+    `Локальный контекст пользователя: ${user.location?.label || 'город не указан'}, ${formatTimezone(user)}, сейчас ${formatUserTime(user)}.`,
+    'Можно естественно ссылаться на конкретные недавние факты из памяти: "ты недавно рассказывал...", но только если они действительно есть в памяти ниже.',
     '',
     `Память о пользователе:\n${memory || 'пока мало данных'}`,
     '',
@@ -451,10 +602,10 @@ async function generateReply(user, text) {
   ].join('\n');
 
   const ai = await callAi(user, prompt);
-  if (ai) return ai;
+  if (ai) return removeRepeatedGreeting(user, ai, text);
   const contextual = contextualLocalReply(user, text);
-  if (contextual) return contextual;
-  return localReply(user, text);
+  if (contextual) return removeRepeatedGreeting(user, contextual, text);
+  return removeRepeatedGreeting(user, localReply(user, text), text);
 }
 
 function commandHelp() {
@@ -465,12 +616,16 @@ function commandHelp() {
     '/cute /calm /playful /serious - быстро сменить стиль',
     '/still calm - сменить стиль старым способом',
     '/new или /news - новости',
+    '/news week или /week - сводка за неделю',
     '/pic или /cat - прислать милую картинку',
     '/video или /catvideo - прислать короткое видео',
     '/topics - выбрать тип новостей',
     '/web запрос - поиск в интернете',
     '/url ссылка - прочитать страницу',
     '/proactive - включить/выключить, чтобы я сама писала',
+    '/schedule 13:00,21:00,23:30 - время самостоятельных сообщений',
+    '/timezone Europe/Minsk - часовой пояс',
+    '/location Минск - запомнить город',
     '/stickers - стикеры',
     '/memory - что я помню',
     '/forget - очистить память'
@@ -942,33 +1097,43 @@ function randomCuteVideoUrl(text = '') {
 }
 
 function startProactiveLoop() {
-  const minutes = Number(env.PROACTIVE_MINUTES || 8);
-  const intervalMs = Math.max(3, minutes) * 60 * 1000;
+  const checkMs = Math.max(1, Number(env.PROACTIVE_CHECK_MINUTES || 5)) * 60 * 1000;
+  setTimeout(() => runProactiveCycle().catch((error) => console.error('Proactive cycle failed:', error.message)), 2500);
+  setInterval(() => {
+    runProactiveCycle().catch((error) => console.error('Proactive cycle failed:', error.message));
+  }, checkMs);
+}
 
-  setInterval(async () => {
-    for (const user of Object.values(users)) {
-      if (!user.chatId || user.proactive === false) continue;
-      const last = user.lastProactiveAt || 0;
-      const lastSeen = user.lastSeenAt || 0;
-      const preference = user.preferences?.proactive;
-      const userInterval = preference === 'more' ? intervalMs * 0.65 : preference === 'less' ? intervalMs * 1.8 : intervalMs;
-      const quietEnough = Date.now() - Math.max(last, lastSeen) > userInterval;
-      if (!quietEnough) continue;
+async function runProactiveCycle(now = Date.now()) {
+  const silenceMinutes = Math.max(30, Number(env.PROACTIVE_SILENCE_MINUTES || 360));
+  for (const user of Object.values(users)) {
+    normalizeUser(user);
+    if (!user.chatId || user.proactive === false) continue;
+    const due = findDueScheduleSlot(user, now);
+    if (!due || user.lastProactiveSlot === due.id) continue;
 
-      try {
-        user.lastProactiveAt = Date.now();
-        const message = await proactiveMessage(user);
-        await saveUsers();
-        await send(user.chatId, splitTelegram(message));
-        if (Math.random() < 0.18) {
-          await handlePictureRequest(user.chatId, user, 'котик');
-        }
-        await maybeSendSticker(user.chatId, user, 0.04, message);
-      } catch (error) {
-        console.error('Proactive message failed:', error.message);
-      }
+    user.lastProactiveSlot = due.id;
+    const quietMinutes = (now - (user.lastSeenAt || 0)) / 60000;
+    if (quietMinutes < silenceMinutes) {
+      await saveUsers();
+      continue;
     }
-  }, Math.min(intervalMs, 10 * 60 * 1000));
+
+    try {
+      user.lastProactiveAt = now;
+      const message = await proactiveMessage(user);
+      recordConversation(user, 'assistant', `[сама написала в ${due.slot}] ${message}`, 'proactive');
+      refreshMemorySummaries(user);
+      await saveUsers();
+      await send(user.chatId, splitTelegram(message));
+      if (Math.random() < Number(env.PROACTIVE_MEDIA_CHANCE || 0.04)) {
+        await handlePictureRequest(user.chatId, user, 'котик');
+      }
+      await maybeSendSticker(user.chatId, user, 0.04, message);
+    } catch (error) {
+      console.error('Proactive message failed:', error.message);
+    }
+  }
 }
 
 async function proactiveMessage(user) {
@@ -999,6 +1164,10 @@ async function proactiveMessage(user) {
   const prompt = [
     'Напиши одно короткое Telegram-сообщение пользователю от лица Kcuni.',
     'Она пишет сама, без вопроса пользователя.',
+    `У пользователя сейчас ${formatUserTime(user)}, город: ${user.location?.label || 'не указан'}.`,
+    `Память о недавних разговорах:\n${buildMemoryContext(user)}`,
+    'Если в памяти есть подходящий недавний факт, естественно сошлись на него. Не выдумывай событий.',
+    'Не здоровайся формально и не начинай знакомство заново.',
     'Стиль должен быть живой, не ассистентский.',
     `Стиль: ${style.prompt}`,
     'Примеры вайба: "привет, я тут прочитала такую инфу..." или "привет, дорогой, как ты? как настроение?"',
@@ -1034,6 +1203,46 @@ function shouldUseSticker(context) {
   return false;
 }
 
+async function understandSticker(user, sticker) {
+  const fallback = stickerFallbackReaction(sticker.emoji || '');
+  if (!env.GEMINI_API_KEY && !env.OPENAI_API_KEY) return fallback;
+
+  try {
+    const visualFileId = (sticker.is_animated || sticker.is_video)
+      ? sticker.thumbnail?.file_id || sticker.file_id
+      : sticker.file_id;
+    const { url, mimeType } = await getTelegramFileInfo(visualFileId);
+    const prompt = [
+      'Посмотри на Telegram-стикер и отреагируй на него как Kcuni, а не как распознаватель изображений.',
+      'Ответь по-русски одной короткой живой репликой. Можно смеяться, удивляться, умиляться или сказать "фу, не присылай мне такое", если стикер неприятный, мерзкий или оскорбительный.',
+      'Не начинай с приветствия. Не пиши "на стикере изображено" и не перечисляй детали механически.',
+      `Связанный emoji: ${sticker.emoji || 'нет'}.`,
+      `Стиль: ${(styles[user.style] || styles.cute).prompt}`,
+      user.hadConversationToday ? 'Вы уже разговариваете сегодня — просто продолжай диалог.' : ''
+    ].join('\n');
+
+    if (env.GEMINI_API_KEY && mimeType.startsWith('image/')) {
+      const reply = await callGeminiMedia(user, prompt, url, mimeType);
+      if (reply) return removeRepeatedGreeting(user, reply, 'стикер');
+    }
+    if (env.OPENAI_API_KEY && mimeType.startsWith('image/')) {
+      const reply = await callVision(user, prompt, url);
+      if (reply) return removeRepeatedGreeting(user, reply, 'стикер');
+    }
+  } catch (error) {
+    console.error('Sticker understanding failed:', error.message);
+  }
+  return fallback;
+}
+
+function stickerFallbackReaction(emoji) {
+  if (/🤮|💩|🖕|🤢|😡|👎/.test(emoji)) return 'фу, не присылай мне такое 😑';
+  if (/😂|🤣|😹/.test(emoji)) return 'ахах, ладно, это смешно)';
+  if (/❤️|🥰|😘|😍|💕/.test(emoji)) return 'мило) это я принимаю';
+  if (/😢|😭|💔/.test(emoji)) return 'эй, ну ты чего такой грустный?';
+  return 'вижу твой стикер) у него явно есть настроение';
+}
+
 async function describeTelegramFile(user, fileId, kind, extraText) {
   const fileUrl = await getTelegramFileUrl(fileId);
 
@@ -1041,15 +1250,18 @@ async function describeTelegramFile(user, fileId, kind, extraText) {
     const prompt = [
       'Опиши фото коротко, по-русски, живо, от лица Kcuni.',
       `Стиль: ${(styles[user.style] || styles.cute).prompt}`,
-      extraText ? `Подпись пользователя:${extraText}` : ''
+      extraText ? `Подпись пользователя:${extraText}` : '',
+      user.hadConversationToday ? 'Не здоровайся: вы уже общаетесь сегодня.' : ''
     ].join('\n');
 
     if (env.GEMINI_API_KEY) {
-      return await callGeminiMedia(user, prompt, fileUrl, 'image/jpeg') || 'вижу фотку, но сейчас не смогла нормально разобрать';
+      const reply = await callGeminiMedia(user, prompt, fileUrl, 'image/jpeg');
+      return reply ? removeRepeatedGreeting(user, reply, '') : 'вижу фотку, но сейчас не смогла нормально разобрать';
     }
 
     if (env.OPENAI_API_KEY) {
-      return await callVision(user, prompt, fileUrl) || 'вижу фотку, но сейчас не смогла нормально разобрать';
+      const reply = await callVision(user, prompt, fileUrl);
+      return reply ? removeRepeatedGreeting(user, reply, '') : 'вижу фотку, но сейчас не смогла нормально разобрать';
     }
 
     return 'вижу фотку) нормально описывать картинки смогу, когда подключим AI-ключ';
@@ -1057,7 +1269,8 @@ async function describeTelegramFile(user, fileId, kind, extraText) {
 
   if (kind === 'voice') {
     if (env.GEMINI_API_KEY) {
-      return await understandGeminiVoice(user, fileUrl) || 'я получила голосовое, но сейчас не смогла его разобрать';
+      const reply = await understandGeminiVoice(user, fileUrl);
+      return reply ? removeRepeatedGreeting(user, reply, '') : 'я получила голосовое, но сейчас не смогла его разобрать';
     }
 
     if (env.OPENAI_API_KEY) {
@@ -1072,9 +1285,11 @@ async function describeTelegramFile(user, fileId, kind, extraText) {
       const prompt = [
         'Пользователь отправил Telegram-кружок. Посмотри видео и ответь по-русски коротко, живо, от лица Kcuni.',
         'Если есть речь, перескажи смысл и ответь на неё. Если речи нет, опиши что видно.',
+        'Не здоровайся и не начинай новый разговор: это продолжение текущего чата.',
         `Стиль: ${(styles[user.style] || styles.cute).prompt}`
       ].join('\n');
-      return await callGeminiMedia(user, prompt, fileUrl, 'video/mp4') || 'вижу кружок, но сейчас не смогла нормально разобрать видео';
+      const reply = await callGeminiMedia(user, prompt, fileUrl, 'video/mp4');
+      return reply ? removeRepeatedGreeting(user, reply, '') : 'вижу кружок, но сейчас не смогла нормально разобрать видео';
     }
 
     return 'вижу кружок) нормально понимать видео смогу, когда подключим Gemini/vision';
@@ -1084,8 +1299,18 @@ async function describeTelegramFile(user, fileId, kind, extraText) {
 }
 
 async function getTelegramFileUrl(fileId) {
+  return (await getTelegramFileInfo(fileId)).url;
+}
+
+async function getTelegramFileInfo(fileId) {
   const file = await tg('getFile', { file_id: fileId });
-  return `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
+  const fileBase = env.TELEGRAM_FILE_BASE || 'https://api.telegram.org/file';
+  const extension = String(file.file_path || '').split('.').pop()?.toLowerCase();
+  const mimeType = {
+    webp: 'image/webp', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+    webm: 'video/webm', tgs: 'application/gzip', ogg: 'audio/ogg', mp4: 'video/mp4'
+  }[extension] || 'application/octet-stream';
+  return { file, mimeType, url: `${fileBase}/bot${BOT_TOKEN}/${file.file_path}` };
 }
 
 async function callVision(user, prompt, imageUrl) {
@@ -1136,7 +1361,8 @@ async function callGeminiMedia(user, prompt, fileUrl, mimeType) {
     if (!mediaResponse.ok) throw new Error(`telegram file ${mediaResponse.status}`);
     const buffer = Buffer.from(await mediaResponse.arrayBuffer());
     const model = env.GEMINI_MEDIA_MODEL || env.GEMINI_MODEL || 'gemini-flash-lite-latest';
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+    const geminiBase = env.GEMINI_API_BASE || 'https://generativelanguage.googleapis.com/v1beta';
+    const url = `${geminiBase}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1189,8 +1415,8 @@ async function transcribeTelegramAudio(user, fileUrl) {
     return '';
   }
 }
-async function handleNews(chatId, user, topic = 'mixed') {
-  const digest = await buildNewsDigest(user, topic, false);
+async function handleNews(chatId, user, topic = 'mixed', days = 1) {
+  const digest = await buildNewsDigest(user, topic, false, days);
   if (!digest) {
     await send(chatId, 'я сейчас не смогла нормально достать новости');
     return;
@@ -1198,7 +1424,7 @@ async function handleNews(chatId, user, topic = 'mixed') {
   await send(chatId, splitTelegram(digest));
 }
 
-async function buildNewsDigest(user, topic = 'mixed', proactive = false) {
+async function buildNewsDigest(user, topic = 'mixed', proactive = false, days = 2) {
   const feeds = (env.NEWS_FEEDS || '').split(',').map((item) => item.trim()).filter(Boolean);
   if (!feeds.length) return '';
 
@@ -1206,7 +1432,7 @@ async function buildNewsDigest(user, topic = 'mixed', proactive = false) {
   for (const feed of feeds.slice(0, 4)) {
     try {
       const xml = await fetchText(feed);
-      items.push(...parseRss(xml).slice(0, 6));
+      items.push(...parseRss(xml).slice(0, days >= 7 ? 30 : 10));
     } catch (error) {
       console.error('News feed failed:', feed, error.message);
     }
@@ -1214,10 +1440,16 @@ async function buildNewsDigest(user, topic = 'mixed', proactive = false) {
 
   if (!items.length) return '';
 
-  const filtered = filterNewsByTopic(items, topic).slice(0, 5);
+  const cutoff = Date.now() - Math.max(1, days) * 24 * 60 * 60 * 1000;
+  const recent = items.filter((item) => !item.publishedAt || Date.parse(item.publishedAt) >= cutoff);
+  const unique = [...new Map((recent.length ? recent : items).map((item) => [item.title.toLowerCase(), item])).values()];
+  const filtered = filterNewsByTopic(unique, topic).slice(0, days >= 7 ? 8 : 5);
   if (!filtered.length) return '';
 
-  const digest = filtered.map((item, index) => `${index + 1}. ${item.title}`).join('\n');
+  const digest = filtered.map((item, index) => {
+    const date = item.publishedAt ? new Date(item.publishedAt).toLocaleDateString('ru-RU', { timeZone: user.timezone || 'UTC' }) : '';
+    return `${index + 1}. ${item.title}${date ? ` (${date})` : ''}${item.link ? `\n${item.link}` : ''}`;
+  }).join('\n');
   const topicLabel = {
     interesting: 'интересные и необычные',
     sad: 'грустные или важные',
@@ -1231,13 +1463,15 @@ async function buildNewsDigest(user, topic = 'mixed', proactive = false) {
       ? 'Напиши как Kcuni сама. Начни естественно: "я тут прочитала..." или "слушай, увидела...". Не как новостной бот.'
       : 'Сделай короткую дружелюбную выжимку новостей.',
     `Тип новостей: ${topicLabel}.`,
+    `Период: последние ${days >= 7 ? '7 дней' : `${days} дн.`}. Не называй старые события новостями этой недели.`,
     `Стиль: ${(styles[user.style] || styles.calm).prompt}`,
     'Если тема тяжёлая, говори мягко, без жести ради жести.',
+    'Сохрани короткие ссылки на источники рядом с соответствующими новостями.',
     digest
   ].join('\n\n');
 
   const ai = await callAi(user, prompt);
-  return ai || `я тут прочитала ${topicLabel} новости:\n${digest}`;
+  return ai || `я тут собрала ${topicLabel} новости за ${days >= 7 ? 'неделю' : 'последние дни'}:\n${digest}`;
 }
 
 function filterNewsByTopic(items, topic) {
@@ -1384,7 +1618,8 @@ async function callAi(user, prompt) {
 async function callGemini(user, prompt) {
   try {
     const model = env.GEMINI_MODEL || 'gemini-flash-lite-latest';
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+    const geminiBase = env.GEMINI_API_BASE || 'https://generativelanguage.googleapis.com/v1beta';
+    const url = `${geminiBase}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1446,9 +1681,251 @@ function getUser(chatId, from) {
     memory: [],
     stickers: [],
     proactive: true,
-    lastSeenAt: Date.now()
+    timezone: DEFAULT_TIMEZONE,
+    proactiveSchedule: [...DEFAULT_PROACTIVE_SCHEDULE],
+    conversationLog: [],
+    memorySummaries: { daily: [], weekly: [], monthly: [] },
+    lastSeenAt: 0
   };
+  normalizeUser(users[key]);
   return users[key];
+}
+
+function normalizeUser(user) {
+  user.memory ||= [];
+  user.stickers ||= [];
+  user.conversationLog ||= [];
+  user.memorySummaries ||= { daily: [], weekly: [], monthly: [] };
+  user.memorySummaries.daily ||= [];
+  user.memorySummaries.weekly ||= [];
+  user.memorySummaries.monthly ||= [];
+  user.proactiveSchedule ||= [...DEFAULT_PROACTIVE_SCHEDULE];
+  if (!user.timezone && !Number.isFinite(user.timezoneOffsetMinutes)) user.timezone = DEFAULT_TIMEZONE;
+  return user;
+}
+
+function recordConversation(user, role, content, type = 'text') {
+  const clean = String(content || '').replace(/\s+/g, ' ').trim().slice(0, 1200);
+  if (!clean || clean.startsWith('/')) return;
+  user.conversationLog ||= [];
+  user.conversationLog.push({ role, content: clean, type, at: new Date().toISOString() });
+  const cutoff = Date.now() - 62 * 24 * 60 * 60 * 1000;
+  user.conversationLog = user.conversationLog
+    .filter((entry) => Date.parse(entry.at) >= cutoff)
+    .slice(-1200);
+}
+
+function refreshMemorySummaries(user) {
+  normalizeUser(user);
+  const byDay = new Map();
+  for (const entry of user.conversationLog) {
+    const key = localDateKey(user, Date.parse(entry.at));
+    if (!byDay.has(key)) byDay.set(key, []);
+    byDay.get(key).push(entry);
+  }
+
+  const daily = [...byDay.entries()].sort(([a], [b]) => a.localeCompare(b)).slice(-45).map(([key, entries]) => ({
+    key,
+    summary: summarizeEntries(entries, 650)
+  }));
+
+  const byWeek = new Map();
+  const byMonth = new Map();
+  for (const day of daily) {
+    const week = weekKey(day.key);
+    const month = day.key.slice(0, 7);
+    if (!byWeek.has(week)) byWeek.set(week, []);
+    if (!byMonth.has(month)) byMonth.set(month, []);
+    byWeek.get(week).push(day);
+    byMonth.get(month).push(day);
+  }
+
+  user.memorySummaries = {
+    daily,
+    weekly: [...byWeek.entries()].slice(-10).map(([key, days]) => ({
+      key,
+      summary: summarizeSummaryRows(days, 1100)
+    })),
+    monthly: [...byMonth.entries()].slice(-6).map(([key, days]) => ({
+      key,
+      summary: summarizeSummaryRows(days, 1500)
+    }))
+  };
+}
+
+function summarizeEntries(entries, limit) {
+  const lines = entries.slice(-24).map((entry) => {
+    const speaker = entry.role === 'assistant' ? 'Kcuni' : 'пользователь';
+    return `${speaker}: ${entry.content}`;
+  });
+  return compactText(lines.join(' | '), limit);
+}
+
+function summarizeSummaryRows(rows, limit) {
+  return compactText(rows.map((row) => `${row.key}: ${row.summary}`).join(' || '), limit);
+}
+
+function compactText(text, limit) {
+  const clean = String(text).replace(/\s+/g, ' ').trim();
+  if (clean.length <= limit) return clean;
+  return `${clean.slice(0, limit - 1).replace(/\s+\S*$/, '')}…`;
+}
+
+function buildMemoryContext(user) {
+  normalizeUser(user);
+  const recent = user.conversationLog.slice(-10)
+    .map((entry) => `${entry.role === 'assistant' ? 'Kcuni' : 'пользователь'}: ${compactText(entry.content, 320)}`)
+    .join('\n');
+  const daily = user.memorySummaries.daily.slice(-7).map((row) => `${row.key}: ${compactText(row.summary, 260)}`).join('\n');
+  const weekly = user.memorySummaries.weekly.slice(-4).map((row) => `${row.key}: ${compactText(row.summary, 380)}`).join('\n');
+  const monthly = user.memorySummaries.monthly.slice(-2).map((row) => `${row.key}: ${compactText(row.summary, 500)}`).join('\n');
+  const facts = user.memory.slice(-12).join('\n');
+  return [
+    `Факты:\n${facts || 'нет'}`,
+    `Последние реплики:\n${recent || 'нет'}`,
+    `Итоги по дням:\n${daily || 'нет'}`,
+    `Итоги по неделям:\n${weekly || 'нет'}`,
+    `Итоги по месяцам:\n${monthly || 'нет'}`
+  ].join('\n\n');
+}
+
+function buildMemoryReport(user) {
+  normalizeUser(user);
+  const day = user.memorySummaries.daily.at(-1);
+  const week = user.memorySummaries.weekly.at(-1);
+  const month = user.memorySummaries.monthly.at(-1);
+  if (!day && !week && !month && !user.memory.length) return 'пока почти ничего не помню';
+  return [
+    user.location?.label ? `ты живёшь: ${user.location.label}; пояс: ${formatTimezone(user)}` : '',
+    day ? `последний день (${day.key}): ${compactText(day.summary, 450)}` : '',
+    week ? `неделя (${week.key}): ${compactText(week.summary, 550)}` : '',
+    month ? `месяц (${month.key}): ${compactText(month.summary, 650)}` : ''
+  ].filter(Boolean).join('\n\n');
+}
+
+function weekKey(dateKey) {
+  const date = new Date(`${dateKey}T12:00:00Z`);
+  const day = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() - day + 1);
+  return date.toISOString().slice(0, 10);
+}
+
+function parseSchedule(value) {
+  return [...new Set(String(value || '').split(/[;,\s]+/).map((item) => {
+    const match = item.match(/^(\d{1,2})(?::(\d{2}))?$/);
+    if (!match) return '';
+    const hour = Number(match[1]);
+    const minute = Number(match[2] || 0);
+    if (hour > 23 || minute > 59) return '';
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  }).filter(Boolean))].sort();
+}
+
+function getUserSchedule(user) {
+  const schedule = parseSchedule(user.proactiveSchedule?.join(',') || '');
+  return schedule.length ? schedule : [...DEFAULT_PROACTIVE_SCHEDULE];
+}
+
+function findDueScheduleSlot(user, timestamp) {
+  const parts = getUserDateParts(user, timestamp);
+  const currentMinutes = parts.hour * 60 + parts.minute;
+  const windowMinutes = Math.max(5, Number(env.PROACTIVE_SLOT_WINDOW_MINUTES || 15));
+  for (const slot of getUserSchedule(user)) {
+    const [hour, minute] = slot.split(':').map(Number);
+    const delta = currentMinutes - (hour * 60 + minute);
+    if (delta >= 0 && delta < windowMinutes) return { slot, id: `${parts.dateKey}/${slot}` };
+  }
+  return null;
+}
+
+function parseTimezone(value) {
+  const raw = String(value || '').trim();
+  const offset = raw.match(/^(?:utc\s*)?([+-])(\d{1,2})(?::?(\d{2}))?$/i);
+  if (offset) {
+    const minutes = (Number(offset[2]) * 60 + Number(offset[3] || 0)) * (offset[1] === '-' ? -1 : 1);
+    if (minutes >= -12 * 60 && minutes <= 14 * 60) return { timezone: '', timezoneOffsetMinutes: minutes };
+  }
+  try {
+    new Intl.DateTimeFormat('ru-RU', { timeZone: raw }).format();
+    return { timezone: raw, timezoneOffsetMinutes: undefined };
+  } catch {
+    return null;
+  }
+}
+
+function getUserDateParts(user, timestamp = Date.now()) {
+  if (user.timezone) {
+    try {
+      const values = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+        timeZone: user.timezone,
+        year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+        hourCycle: 'h23'
+      }).formatToParts(new Date(timestamp)).filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
+      return {
+        dateKey: `${values.year}-${values.month}-${values.day}`,
+        hour: Number(values.hour), minute: Number(values.minute)
+      };
+    } catch {
+      // Fall through to a fixed offset.
+    }
+  }
+  const shifted = new Date(timestamp + Number(user.timezoneOffsetMinutes || 0) * 60000);
+  return { dateKey: shifted.toISOString().slice(0, 10), hour: shifted.getUTCHours(), minute: shifted.getUTCMinutes() };
+}
+
+function localDateKey(user, timestamp = Date.now()) {
+  return getUserDateParts(user, timestamp).dateKey;
+}
+
+function formatUserTime(user, timestamp = Date.now()) {
+  const parts = getUserDateParts(user, timestamp);
+  return `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`;
+}
+
+function formatTimezone(user) {
+  if (user.timezone) return user.timezone;
+  const minutes = Number(user.timezoneOffsetMinutes || 0);
+  const sign = minutes >= 0 ? '+' : '-';
+  const absolute = Math.abs(minutes);
+  return `UTC${sign}${String(Math.floor(absolute / 60)).padStart(2, '0')}:${String(absolute % 60).padStart(2, '0')}`;
+}
+
+function longitudeToOffsetMinutes(longitude) {
+  return clamp(Math.round(Number(longitude) / 15), -12, 14) * 60;
+}
+
+const CITY_TIMEZONES = {
+  'минск': 'Europe/Minsk', 'минске': 'Europe/Minsk', 'москва': 'Europe/Moscow', 'москве': 'Europe/Moscow', 'питер': 'Europe/Moscow', 'питере': 'Europe/Moscow', 'санкт-петербург': 'Europe/Moscow',
+  'киев': 'Europe/Kyiv', 'киеве': 'Europe/Kyiv', 'київ': 'Europe/Kyiv', 'варшава': 'Europe/Warsaw', 'варшаве': 'Europe/Warsaw', 'берлин': 'Europe/Berlin', 'берлине': 'Europe/Berlin',
+  'лондон': 'Europe/London', 'париж': 'Europe/Paris', 'нью-йорк': 'America/New_York', 'лос-анджелес': 'America/Los_Angeles',
+  'тбилиси': 'Asia/Tbilisi', 'ереван': 'Asia/Yerevan', 'алматы': 'Asia/Almaty', 'астана': 'Asia/Almaty',
+  'ташкент': 'Asia/Tashkent', 'дубай': 'Asia/Dubai', 'токио': 'Asia/Tokyo'
+};
+
+function setUserCity(user, city) {
+  const clean = String(city || '').trim().replace(/[.!?]+$/, '').slice(0, 80);
+  if (!clean) return;
+  user.location = { ...(user.location || {}), label: clean };
+  const timezone = CITY_TIMEZONES[normalizeText(clean)];
+  if (timezone) {
+    user.timezone = timezone;
+    user.timezoneOffsetMinutes = undefined;
+  }
+}
+
+function detectCityStatement(text) {
+  const match = String(text).match(/(?:я\s+живу\s+в|мой\s+город\s*[-—:]?|я\s+из)\s+([\p{L}-]+(?:\s+[\p{L}-]+){0,2}?)(?=\s+(?:и|но|а)\s+|[,.!?]|$)/iu);
+  return match?.[1]?.trim() || '';
+}
+
+function isGreetingRequest(text) {
+  return /(?:поздоровайся|скажи\s+(?:мне\s+)?привет|пожелай\s+доброго\s+дня)/i.test(text);
+}
+
+function removeRepeatedGreeting(user, reply, sourceText) {
+  if (!user.hadConversationToday || isGreetingRequest(sourceText)) return reply;
+  const stripped = String(reply).replace(/^\s*(?:привет(?:ик)?|здравствуй(?:те)?|здорово|хай|хей)[,!.)\s—-]*/iu, '').trim();
+  return stripped || reply;
 }
 
 function remember(user, text) {
@@ -1621,13 +2098,32 @@ function htmlToText(html) {
 }
 
 function parseRss(xml) {
-  return [...xml.matchAll(/<item>[\s\S]*?<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>[\s\S]*?<\/item>|<item>[\s\S]*?<title>([\s\S]*?)<\/title>[\s\S]*?<\/item>/g)]
-    .map((match) => ({ title: decodeXml(match[1] || match[2] || '') }))
+  const blocks = [
+    ...String(xml).matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/gi),
+    ...String(xml).matchAll(/<entry\b[^>]*>([\s\S]*?)<\/entry>/gi)
+  ].map((match) => match[1]);
+  return blocks
+    .map((block) => {
+      const title = readXmlTag(block, 'title');
+      const published = readXmlTag(block, 'pubDate') || readXmlTag(block, 'published') || readXmlTag(block, 'updated');
+      const linkTag = block.match(/<link\b[^>]*href=["']([^"']+)["'][^>]*\/?\s*>/i)?.[1] || readXmlTag(block, 'link');
+      const parsedDate = Date.parse(published);
+      return {
+        title: decodeXml(title),
+        link: decodeXml(linkTag),
+        publishedAt: Number.isFinite(parsedDate) ? new Date(parsedDate).toISOString() : ''
+      };
+    })
     .filter((item) => item.title && !/реклама|advert|sponsor/i.test(item.title));
 }
 
+function readXmlTag(block, tag) {
+  const match = String(block).match(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'));
+  return String(match?.[1] || '').replace(/^<!\[CDATA\[|\]\]>$/g, '').trim();
+}
+
 function decodeXml(value) {
-  return value
+  return String(value || '')
     .replace(/&quot;/g, '"')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')

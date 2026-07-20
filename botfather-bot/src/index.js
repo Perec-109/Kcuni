@@ -17,6 +17,7 @@ const USERS_FILE = new URL('../data/users.json', import.meta.url);
 const MAX_MESSAGES_PER_REPLY = Number(env.MAX_MESSAGES_PER_REPLY || 2);
 const DEFAULT_TIMEZONE = env.DEFAULT_TIMEZONE || 'Europe/Minsk';
 const DEFAULT_PROACTIVE_SCHEDULE = parseSchedule(env.PROACTIVE_SCHEDULE || '13:00,21:00,23:30');
+const BUILD_VERSION = '2026-07-20-command-fix-1';
 
 const styles = {
   cute: {
@@ -45,7 +46,7 @@ await mkdir(DATA_DIR, { recursive: true });
 let users = await readJson(USERS_FILE, {});
 let offset = 0;
 
-console.log('Kcuni BotFather bot started.');
+console.log(`Kcuni BotFather bot started (${BUILD_VERSION}).`);
 startProactiveLoop();
 await startBot();
 
@@ -118,7 +119,7 @@ async function startWebhookServer(publicUrl, bot) {
 
     if (request.method === 'GET' && (requestUrl.pathname === '/' || requestUrl.pathname === '/healthz')) {
       response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      response.end(JSON.stringify({ ok: true, service: 'kcuni-bot' }));
+      response.end(JSON.stringify({ ok: true, service: 'kcuni-bot', version: BUILD_VERSION }));
       return;
     }
 
@@ -275,7 +276,7 @@ async function handleMessage(message) {
   }
 
   if (!message.text) return;
-  const text = message.text.trim();
+  const text = normalizeIncomingText(message.text);
 
   user.lastSeenAt = Date.now();
   user.chatId = chatId;
@@ -491,7 +492,18 @@ async function handleMessage(message) {
     return;
   }
 
-  if (text === '/news' || text === '/new' || text === '/headline') {
+  if (text === '/headline') {
+    const article = await buildContextualArticle(user, 2);
+    if (article) {
+      await saveUsers();
+      await send(chatId, splitTelegram(article));
+    } else {
+      await handleNews(chatId, user, user.newsTopic || 'mixed', 2);
+    }
+    return;
+  }
+
+  if (text === '/news' || text === '/new') {
     await handleNews(chatId, user, user.newsTopic || 'mixed', 1);
     return;
   }
@@ -538,6 +550,11 @@ async function handleMessage(message) {
 
   if (text.startsWith('/url ')) {
     await handleUrl(chatId, user, text.slice(5).trim());
+    return;
+  }
+
+  if (text.startsWith('/')) {
+    await send(chatId, 'не знаю такую команду. нажми /help — там весь список');
     return;
   }
 
@@ -798,6 +815,27 @@ function detectTopic(normalized) {
 
 function normalizeText(text) {
   return String(text).toLowerCase().replace(/ё/g, 'е').replace(/[!?.,]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function normalizeIncomingText(value) {
+  const text = String(value || '').trim();
+  if (!text.startsWith('/')) return text;
+  return text
+    .replace(/^\/([a-z0-9_]+)@[a-z0-9_]+(?=\s|$)/i, '/$1')
+    .replace(/^\/([a-z0-9_]+)/i, (command) => command.toLowerCase());
+}
+
+function sanitizeGeneratedText(value) {
+  let text = String(value || '').trim();
+  if (!text) return '';
+  const forbidden = [
+    /я\s+(?:все\s+)?поняла\s*[,:—-]?\s*(?:этот\s+)?тон[^.!?\n]*[.!?]?/giu,
+    /буду\s+(?:чуть\s+)?дерзч(?:е|ей)[^.!?\n]*[.!?]?/giu,
+    /(?:но\s+)?без\s+(?:тупой\s+)?пошлости\s+ради\s+пошлости[^.!?\n]*[.!?]?/giu,
+    /(?:окей|ладно|хорошо)\s*[,:—-]?\s*(?:я\s+)?(?:подстроилась|перехожу|переходим)[^.!?\n]*[.!?]?/giu
+  ];
+  for (const pattern of forbidden) text = text.replace(pattern, ' ');
+  return text.replace(/[ \t]{2,}/g, ' ').replace(/\s+([,.!?])/g, '$1').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function pickByStyle(user, variants) {
@@ -1501,7 +1539,7 @@ async function callVision(user, prompt, imageUrl) {
     });
     if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
     const data = await response.json();
-    return data.choices?.[0]?.message?.content?.trim() || '';
+    return sanitizeGeneratedText(data.choices?.[0]?.message?.content);
   } catch (error) {
     console.error('Vision error:', error.message);
     return '';
@@ -1552,7 +1590,7 @@ async function callGeminiMedia(user, prompt, fileUrl, mimeType) {
 
     if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
     const data = await response.json();
-    return data.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
+    return sanitizeGeneratedText(data.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join(''));
   } catch (error) {
     console.error('Gemini media error:', error.message);
     return '';
@@ -1810,7 +1848,7 @@ async function callGemini(user, prompt) {
 
     if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
     const data = await response.json();
-    return data.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
+    return sanitizeGeneratedText(data.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join(''));
   } catch (error) {
     console.error('Gemini error:', error.message);
     return '';
@@ -1837,7 +1875,7 @@ async function callOpenAi(user, prompt) {
 
     if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
     const data = await response.json();
-    return data.choices?.[0]?.message?.content?.trim() || '';
+    return sanitizeGeneratedText(data.choices?.[0]?.message?.content);
   } catch (error) {
     console.error('OpenAI error:', error.message);
     return '';

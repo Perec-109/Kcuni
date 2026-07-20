@@ -35,6 +35,8 @@ const mockServer = createServer(async (request, response) => {
       ? 'фу, не присылай мне такое 😑'
       : prompt.includes('Период: последние 7 дней')
         ? 'вот тебе короткая сводка новостей за неделю'
+        : prompt.includes('проверка тавтологии')
+          ? 'Я поняла тон, буду дерзче, но без тупой пошлости ради пошлости.'
         : 'помню наш разговор и продолжаю без приветствия';
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] }));
@@ -89,7 +91,7 @@ try {
 
   const health = await fetch(`http://127.0.0.1:${appPort}/healthz`);
   assert.equal(health.status, 200);
-  assert.deepEqual(await health.json(), { ok: true, service: 'kcuni-bot' });
+  assert.deepEqual(await health.json(), { ok: true, service: 'kcuni-bot', version: '2026-07-20-command-fix-1' });
 
   const unauthorized = await fetch(`http://127.0.0.1:${appPort}/telegram/webhook`, { method: 'POST', body: '{}' });
   assert.equal(unauthorized.status, 401);
@@ -105,6 +107,15 @@ try {
 
   await postUpdate({ text: '/schedule auto' });
   await waitForMessageContaining('буду сама выбирать момент', 5000);
+
+  await postUpdate({ text: '/Headline@kcuni_smoke_bot' });
+  await waitForMessageContaining('https://example.com/ai', 5000);
+
+  await postUpdate({ text: '/HELP@kcuni_smoke_bot' });
+  await waitForMessageContaining('команды Kcuni', 5000);
+
+  await postUpdate({ text: '/unknown_command@kcuni_smoke_bot' });
+  await waitForMessageContaining('не знаю такую команду', 5000);
 
   await postUpdate({ text: 'я живу в Минске и люблю космос' });
   await waitForMessageContaining('продолжаю без приветствия', 5000);
@@ -122,6 +133,11 @@ try {
 
   await postUpdate({ text: 'на колени, на колени быстро' });
   await waitForMessageContaining('успокаиваемся', 5000);
+
+  const tautologyMessageCount = sentMessages().length;
+  await postUpdate({ text: 'проверка тавтологии в ответе' });
+  await waitFor(() => sentMessages().length > tautologyMessageCount, 5000);
+  assert.ok(sentMessages().slice(tautologyMessageCount).every((message) => !/я поняла тон|буду дерзче|пошлости ради пошлости/i.test(message)));
 
   await postUpdate({ sticker: { file_id: 'sticker-1', file_unique_id: 'unique-1', emoji: '🤮', width: 512, height: 512 } });
   await waitForMessageContaining('не присылай мне такое', 5000);

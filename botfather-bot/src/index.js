@@ -1,5 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { createServer } from 'node:http';
 
 const env = loadEnv();
 const BOT_TOKEN = env.BOT_TOKEN;
@@ -9,7 +11,7 @@ if (!BOT_TOKEN) {
   process.exit(1);
 }
 
-const API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+const API = `${env.TELEGRAM_API_BASE || 'https://api.telegram.org'}/bot${BOT_TOKEN}`;
 const DATA_DIR = new URL('../data/', import.meta.url);
 const USERS_FILE = new URL('../data/users.json', import.meta.url);
 const MAX_MESSAGES_PER_REPLY = Number(env.MAX_MESSAGES_PER_REPLY || 2);
@@ -43,25 +45,112 @@ let offset = 0;
 
 console.log('Kcuni BotFather bot started.');
 startProactiveLoop();
+await startBot();
 
-while (true) {
-  try {
-    const updates = await tg('getUpdates', {
-      offset,
-      timeout: 25,
-      allowed_updates: ['message']
-    });
-
-    for (const update of updates) {
-      offset = update.update_id + 1;
-      if (update.message) {
-        await handleMessage(update.message);
-      }
-    }
-  } catch (error) {
-    console.error('Polling error:', error.message);
-    await sleep(2500);
+async function startBot() {
+  const publicUrl = String(env.WEBHOOK_URL || env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
+  if (publicUrl) {
+    await startWebhookServer(publicUrl);
+    return;
   }
+
+  await tg('deleteWebhook', { drop_pending_updates: false });
+  const bot = await tg('getMe', {});
+  console.log(`Long polling enabled for @${bot.username}.`);
+  await pollUpdates();
+}
+
+async function pollUpdates() {
+  while (true) {
+    try {
+      const updates = await tg('getUpdates', {
+        offset,
+        timeout: 25,
+        allowed_updates: ['message']
+      });
+
+      for (const update of updates) {
+        offset = update.update_id + 1;
+        await handleUpdate(update);
+      }
+    } catch (error) {
+      console.error('Polling error:', error.message);
+      await sleep(2500);
+    }
+  }
+}
+
+async function handleUpdate(update) {
+  if (update?.message) await handleMessage(update.message);
+}
+
+async function startWebhookServer(publicUrl) {
+  const port = Number(env.PORT || 10000);
+  const webhookPath = '/telegram/webhook';
+  const webhookSecret = env.WEBHOOK_SECRET || createHash('sha256').update(BOT_TOKEN).digest('hex');
+  let updateQueue = Promise.resolve();
+
+  const server = createServer(async (request, response) => {
+    const requestUrl = new URL(request.url || '/', 'http://localhost');
+
+    if (request.method === 'GET' && (requestUrl.pathname === '/' || requestUrl.pathname === '/healthz')) {
+      response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      response.end(JSON.stringify({ ok: true, service: 'kcuni-bot' }));
+      return;
+    }
+
+    if (request.method !== 'POST' || requestUrl.pathname !== webhookPath) {
+      response.writeHead(404).end();
+      return;
+    }
+
+    const suppliedSecret = String(request.headers['x-telegram-bot-api-secret-token'] || '');
+    if (!safeEqual(suppliedSecret, webhookSecret)) {
+      response.writeHead(401).end();
+      return;
+    }
+
+    try {
+      const update = await readJsonBody(request);
+      response.writeHead(200).end('ok');
+      updateQueue = updateQueue
+        .then(() => handleUpdate(update))
+        .catch((error) => console.error('Webhook update failed:', error.message));
+    } catch (error) {
+      response.writeHead(error.message === 'payload too large' ? 413 : 400).end();
+    }
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '0.0.0.0', resolve);
+  });
+
+  const bot = await tg('getMe', {});
+  await tg('setWebhook', {
+    url: `${publicUrl}${webhookPath}`,
+    secret_token: webhookSecret,
+    allowed_updates: ['message'],
+    drop_pending_updates: false
+  });
+  console.log(`Webhook enabled for @${bot.username} on port ${port}.`);
+}
+
+async function readJsonBody(request) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > 1_000_000) throw new Error('payload too large');
+    chunks.push(chunk);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+function safeEqual(left, right) {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
 async function handleMessage(message) {

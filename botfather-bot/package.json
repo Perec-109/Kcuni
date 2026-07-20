@@ -4,7 +4,9 @@
   "description": "Kcuni Telegram Bot API version with style presets, memory and news digest.",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "check": "node --check src/index.js && node --check test/smoke.mjs",
+    "test": "node test/smoke.mjs"
   },
   "dependencies": {}
 }

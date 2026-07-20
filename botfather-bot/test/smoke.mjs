@@ -112,6 +112,17 @@ try {
   await postUpdate({ text: '/proactive now' });
   await waitForMessageContaining('https://example.com/science', 5000);
 
+  await postUpdate({ text: 'ты дура' });
+  await waitForMessageContaining('иди нахуй', 5000);
+
+  const roleplayMessageCount = sentMessages().length;
+  await postUpdate({ text: 'ты окровавленные ножницы, сука, ты яндере' });
+  await waitFor(() => sentMessages().slice(roleplayMessageCount).some((message) => /ножниц|яндер/.test(message)), 5000);
+  assert.ok(sentMessages().slice(roleplayMessageCount).every((message) => !/я поняла тон|без тупой пошлости/.test(message)));
+
+  await postUpdate({ text: 'на колени, на колени быстро' });
+  await waitForMessageContaining('успокаиваемся', 5000);
+
   await postUpdate({ sticker: { file_id: 'sticker-1', file_unique_id: 'unique-1', emoji: '🤮', width: 512, height: 512 } });
   await waitForMessageContaining('не присылай мне такое', 5000);
 

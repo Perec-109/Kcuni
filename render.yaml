@@ -29,6 +29,10 @@ services:
         value: "360"
       - key: PROACTIVE_MEDIA_CHANCE
         value: "0.04"
+      - key: RENDER_KEEP_ALIVE
+        value: "true"
+      - key: REMINDER_CHECK_MS
+        value: "30000"
       - key: MAX_MESSAGES_PER_REPLY
         value: "2"
       - key: TYPING_MIN_MS

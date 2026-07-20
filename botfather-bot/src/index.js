@@ -17,8 +17,9 @@ const USERS_FILE = new URL('../data/users.json', import.meta.url);
 const MAX_MESSAGES_PER_REPLY = Number(env.MAX_MESSAGES_PER_REPLY || 2);
 const DEFAULT_TIMEZONE = env.DEFAULT_TIMEZONE || 'Europe/Minsk';
 const DEFAULT_PROACTIVE_SCHEDULE = parseSchedule(env.PROACTIVE_SCHEDULE || '13:00,21:00,23:30');
-const BUILD_VERSION = '2026-07-21-reminders-feedback-1';
+const BUILD_VERSION = '2026-07-21-video-understanding-1';
 const REMINDER_MINUTE_MS = Math.max(25, Number(env.REMINDER_MINUTE_MS || 60_000));
+const TELEGRAM_DOWNLOAD_LIMIT_BYTES = 20 * 1024 * 1024;
 
 const styles = {
   cute: {
@@ -50,6 +51,7 @@ let offset = 0;
 console.log(`Kcuni BotFather bot started (${BUILD_VERSION}).`);
 startProactiveLoop();
 startReminderLoop();
+startRenderKeepAliveLoop();
 await startBot();
 
 async function startBot() {
@@ -280,11 +282,23 @@ async function handleMessage(message) {
     return;
   }
 
+  const directMedia = extractMessageMedia(message);
+  if (directMedia) {
+    await handleMediaMessage(chatId, user, directMedia, message.caption || '');
+    return;
+  }
+
   if (!message.text) return;
   const text = normalizeIncomingText(message.text);
 
   user.lastSeenAt = Date.now();
   user.chatId = chatId;
+
+  const repliedMedia = extractMessageMedia(message.reply_to_message);
+  if (repliedMedia) {
+    await handleMediaMessage(chatId, user, repliedMedia, text, true);
+    return;
+  }
 
   const rememberedCity = detectCityStatement(text);
   if (rememberedCity) setUserCity(user, rememberedCity);
@@ -1422,17 +1436,22 @@ async function runReminderCycle(now = Date.now()) {
     normalizeUser(user);
     if (!user.chatId) continue;
     const due = user.reminders
-      .filter((reminder) => !reminder.sentAt && Number(reminder.dueAt) <= now)
+      .filter((reminder) => !reminder.sentAt && (!reminder.sendingAt || now - reminder.sendingAt > 5 * 60 * 1000) && Number(reminder.dueAt) <= now)
       .sort((left, right) => left.dueAt - right.dueAt);
     for (const reminder of due) {
       try {
+        reminder.sendingAt = now;
+        await saveUsers();
         const message = reminderMessage(reminder, now);
         await send(user.chatId, message);
         reminder.sentAt = Date.now();
+        delete reminder.sendingAt;
         recordConversation(user, 'assistant', message, 'reminder');
         refreshMemorySummaries(user);
         await saveUsers();
       } catch (error) {
+        delete reminder.sendingAt;
+        await saveUsers();
         console.error('Reminder send failed:', error.message);
       }
     }
@@ -1628,7 +1647,7 @@ function shouldUseSticker(context) {
   if (/стикер|ахах|хаха|лол|ору|смешн|мил|любл|скуч|спок|ладно|окей|привет|пока|обня|цел|кайф|красив|жесть|пизд|бля/.test(text)) {
     return true;
   }
-  if (/photo|voice|video_note/.test(text)) return Math.random() < 0.35;
+  if (/photo|voice|video_note|video|animation/.test(text)) return Math.random() < 0.35;
   return false;
 }
 
@@ -1672,19 +1691,117 @@ function stickerFallbackReaction(emoji) {
   return 'вижу твой стикер) у него явно есть настроение';
 }
 
-async function describeTelegramFile(user, fileId, kind, extraText) {
-  const fileUrl = await getTelegramFileUrl(fileId);
+function startRenderKeepAliveLoop() {
+  const renderUrl = String(env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
+  if (!renderUrl || /^(0|false|off)$/i.test(String(env.RENDER_KEEP_ALIVE || 'true'))) return;
+  const keepAlive = async () => {
+    try {
+      const response = await fetch(`${renderUrl}/healthz`, { signal: AbortSignal.timeout(20_000) });
+      if (!response.ok) throw new Error(`healthz ${response.status}`);
+    } catch (error) {
+      console.error('Render keep-alive failed:', error.message);
+    }
+  };
+  setTimeout(keepAlive, 5 * 60 * 1000);
+  setInterval(keepAlive, 10 * 60 * 1000);
+}
+
+function extractMessageMedia(message) {
+  if (!message) return null;
+  if (message.video?.file_id) {
+    return {
+      fileId: message.video.file_id,
+      kind: 'video',
+      mimeType: message.video.mime_type || 'video/mp4',
+      fileSize: message.video.file_size || 0,
+      thumbnailFileId: message.video.thumbnail?.file_id || message.video.thumb?.file_id || ''
+    };
+  }
+  if (message.animation?.file_id) {
+    return {
+      fileId: message.animation.file_id,
+      kind: 'animation',
+      mimeType: message.animation.mime_type || 'video/mp4',
+      fileSize: message.animation.file_size || 0,
+      thumbnailFileId: message.animation.thumbnail?.file_id || message.animation.thumb?.file_id || ''
+    };
+  }
+  if (message.video_note?.file_id) {
+    return {
+      fileId: message.video_note.file_id,
+      kind: 'video_note',
+      mimeType: 'video/mp4',
+      fileSize: message.video_note.file_size || 0,
+      thumbnailFileId: message.video_note.thumbnail?.file_id || message.video_note.thumb?.file_id || ''
+    };
+  }
+  if (message.photo?.length) {
+    const photo = message.photo.at(-1);
+    return { fileId: photo.file_id, kind: 'photo', mimeType: 'image/jpeg', fileSize: photo.file_size || 0 };
+  }
+  const document = message.document;
+  if (document?.file_id && /^image\//i.test(document.mime_type || '')) {
+    return { fileId: document.file_id, kind: 'photo', mimeType: document.mime_type, fileSize: document.file_size || 0 };
+  }
+  if (document?.file_id && /^video\//i.test(document.mime_type || '')) {
+    return {
+      fileId: document.file_id,
+      kind: 'video',
+      mimeType: document.mime_type,
+      fileSize: document.file_size || 0,
+      thumbnailFileId: document.thumbnail?.file_id || document.thumb?.file_id || ''
+    };
+  }
+  return null;
+}
+
+async function handleMediaMessage(chatId, user, media, userText = '', isReply = false) {
+  user.lastSeenAt = Date.now();
+  user.chatId = chatId;
+  const label = media.kind === 'photo' ? 'картинка' : media.kind === 'animation' ? 'анимация' : 'видео';
+  const context = userText ? `; вопрос/подпись: ${userText}` : '';
+  remember(user, `[${label}]${context}`);
+  const reply = await describeTelegramFile(user, media.fileId, media.kind, userText, media);
+  recordConversation(user, 'user', `[${isReply ? `вопрос к ${label}` : label}]${context}`, `${media.kind}-media`);
+  recordConversation(user, 'assistant', reply, `${media.kind}-understanding`);
+  remember(user, `[${label} understood] ${reply}`);
+  user.dialogue ||= {};
+  user.dialogue.lastTopic = reply.slice(0, 240);
+  refreshMemorySummaries(user);
+  await saveUsers();
+  await send(chatId, splitTelegram(reply));
+  await maybeSendSticker(chatId, user, 0.05, media.kind);
+}
+
+async function describeTelegramFile(user, fileId, kind, extraText, options = {}) {
+  if (options.fileSize > TELEGRAM_DOWNLOAD_LIMIT_BYTES) {
+    return await describeOversizedVideo(user, options, extraText);
+  }
+
+  let fileInfo;
+  try {
+    fileInfo = await getTelegramFileInfo(fileId, options.mimeType);
+  } catch (error) {
+    console.error('Telegram media lookup failed:', error.message);
+    return 'не смогла скачать этот файл из Telegram. перешли его ещё раз или отправь более короткий фрагмент';
+  }
+  if ((fileInfo.file.file_size || 0) > TELEGRAM_DOWNLOAD_LIMIT_BYTES) {
+    return await describeOversizedVideo(user, options, extraText);
+  }
+  const fileUrl = fileInfo.url;
+  const mimeType = options.mimeType || fileInfo.mimeType;
 
   if (kind === 'photo') {
     const prompt = [
-      'Опиши фото коротко, по-русски, живо, от лица Kcuni.',
+      'Внимательно рассмотри изображение. Коротко объясни, что на нём происходит, прочитай заметный текст и ответь на вопрос пользователя, если он есть.',
+      'Не выдумывай детали, которых не видно. Ответь по-русски живо, от лица Kcuni, и оставь возможность продолжить разговор об изображении.',
       `Стиль: ${(styles[user.style] || styles.cute).prompt}`,
-      extraText ? `Подпись пользователя:${extraText}` : '',
+      extraText ? `Вопрос или подпись пользователя: ${extraText}` : '',
       user.hadConversationToday ? 'Не здоровайся: вы уже общаетесь сегодня.' : ''
     ].join('\n');
 
     if (env.GEMINI_API_KEY) {
-      const reply = await callGeminiMedia(user, prompt, fileUrl, 'image/jpeg');
+      const reply = await callGeminiMedia(user, prompt, fileUrl, mimeType.startsWith('image/') ? mimeType : 'image/jpeg');
       return reply ? removeRepeatedGreeting(user, reply, '') : 'вижу фотку, но сейчас не смогла нормально разобрать';
     }
 
@@ -1709,19 +1826,22 @@ async function describeTelegramFile(user, fileId, kind, extraText) {
     return 'я получила голосовое, но расшифровку надо подключить через AI-ключ';
   }
 
-  if (kind === 'video_note') {
+  if (kind === 'video_note' || kind === 'video' || kind === 'animation') {
     if (env.GEMINI_API_KEY) {
       const prompt = [
-        'Пользователь отправил Telegram-кружок. Посмотри видео и ответь по-русски коротко, живо, от лица Kcuni.',
-        'Если есть речь, перескажи смысл и ответь на неё. Если речи нет, опиши что видно.',
+        kind === 'video_note' ? 'Пользователь отправил Telegram-кружок.' : 'Пользователь отправил видео в Telegram.',
+        'Посмотри доступное видео целиком: учти и изображение, и звук.',
+        'Коротко расскажи, о чём видео, перескажи смысл речи и назови ключевые моменты. Если речи нет, опиши происходящее.',
+        extraText ? `Отдельно ответь на вопрос или подпись пользователя: ${extraText}` : '',
+        'Если что-то неразборчиво, прямо скажи об этом и не выдумывай. Сохрани тему, чтобы дальше можно было обсуждать это видео.',
         'Не здоровайся и не начинай новый разговор: это продолжение текущего чата.',
         `Стиль: ${(styles[user.style] || styles.cute).prompt}`
       ].join('\n');
-      const reply = await callGeminiMedia(user, prompt, fileUrl, 'video/mp4');
-      return reply ? removeRepeatedGreeting(user, reply, '') : 'вижу кружок, но сейчас не смогла нормально разобрать видео';
+      const reply = await callGeminiMedia(user, prompt, fileUrl, mimeType.startsWith('video/') ? mimeType : 'video/mp4');
+      return reply ? removeRepeatedGreeting(user, reply, '') : 'вижу видео, но сейчас не смогла нормально разобрать его. попробуй отправить более короткий фрагмент';
     }
 
-    return 'вижу кружок) нормально понимать видео смогу, когда подключим Gemini/vision';
+    return 'вижу видео, но для просмотра и пересказа нужен подключённый Gemini-ключ';
   }
 
   return 'получила файл';
@@ -1731,11 +1851,36 @@ async function getTelegramFileUrl(fileId) {
   return (await getTelegramFileInfo(fileId)).url;
 }
 
-async function getTelegramFileInfo(fileId) {
+async function describeOversizedVideo(user, options, extraText) {
+  let preview = '';
+  if (options.thumbnailFileId && (env.GEMINI_API_KEY || env.OPENAI_API_KEY)) {
+    try {
+      const thumbnail = await getTelegramFileInfo(options.thumbnailFileId, 'image/jpeg');
+      const prompt = [
+        'Это только превью большого Telegram-видео, а не весь ролик.',
+        'Коротко опиши, что видно на кадре. Не утверждай, что знаешь содержание или речь всего видео.',
+        extraText ? `Вопрос пользователя: ${extraText}` : '',
+        `Стиль: ${(styles[user.style] || styles.cute).prompt}`
+      ].join('\n');
+      preview = env.GEMINI_API_KEY
+        ? await callGeminiMedia(user, prompt, thumbnail.url, thumbnail.mimeType)
+        : await callVision(user, prompt, thumbnail.url);
+    } catch (error) {
+      console.error('Video thumbnail understanding failed:', error.message);
+    }
+  }
+  return [
+    'это видео больше 20 МБ, поэтому Telegram не даёт мне скачать его целиком — речь и весь сюжет я сейчас честно не перескажу.',
+    preview ? `по превью: ${preview}` : '',
+    'пришли короткий или сжатый фрагмент до 20 МБ — тогда посмотрю его со звуком, перескажу и обсудим.'
+  ].filter(Boolean).join('\n\n');
+}
+
+async function getTelegramFileInfo(fileId, declaredMimeType = '') {
   const file = await tg('getFile', { file_id: fileId });
   const fileBase = env.TELEGRAM_FILE_BASE || 'https://api.telegram.org/file';
   const extension = String(file.file_path || '').split('.').pop()?.toLowerCase();
-  const mimeType = {
+  const mimeType = declaredMimeType || {
     webp: 'image/webp', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
     webm: 'video/webm', tgs: 'application/gzip', ogg: 'audio/ogg', mp4: 'video/mp4'
   }[extension] || 'application/octet-stream';
@@ -1788,7 +1933,10 @@ async function callGeminiMedia(user, prompt, fileUrl, mimeType) {
   try {
     const mediaResponse = await fetch(fileUrl);
     if (!mediaResponse.ok) throw new Error(`telegram file ${mediaResponse.status}`);
+    const contentLength = Number(mediaResponse.headers.get('content-length') || 0);
+    if (contentLength > TELEGRAM_DOWNLOAD_LIMIT_BYTES) throw new Error('telegram media exceeds 20 MB');
     const buffer = Buffer.from(await mediaResponse.arrayBuffer());
+    if (buffer.length > TELEGRAM_DOWNLOAD_LIMIT_BYTES) throw new Error('telegram media exceeds 20 MB');
     const model = env.GEMINI_MEDIA_MODEL || env.GEMINI_MODEL || 'gemini-flash-lite-latest';
     const geminiBase = env.GEMINI_API_BASE || 'https://generativelanguage.googleapis.com/v1beta';
     const url = `${geminiBase}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
@@ -2293,6 +2441,7 @@ function schedulesEqual(left, right) {
 function parseReminderRequest(user, text, now = Date.now()) {
   const normalized = normalizeText(text);
   if (!/(напиши мне|напомни мне|напомни|пни меня)/.test(normalized)) return null;
+  const timeText = String(text).toLowerCase().replace(/ё/g, 'е');
 
   const relative = normalized.match(/через\s+(?:(минут\S*|час\S*)\s+)?(\d{1,3})(?:\s*[-–—]\s*(\d{1,3}))?\s*(минут\S*|мин\S*|час\S*)?/i);
   if (relative) {
@@ -2306,7 +2455,7 @@ function parseReminderRequest(user, text, now = Date.now()) {
     });
   }
 
-  const absolute = normalized.match(/(сегодня|завтра)\s+(?:в\s*)?(\d{1,2})[:.](\d{2})(?:\s*[-–—]\s*(?:(\d{1,2})[:.])?(\d{2}))?/i);
+  const absolute = timeText.match(/(?:(сегодня|завтра)\s+)?(?:в\s*)?(\d{1,2})[:.](\d{2})(?:\s*[-–—]\s*(?:(\d{1,2})[:.])?(\d{2}))?/i);
   if (!absolute) return null;
   const startHour = Number(absolute[2]);
   const startMinute = Number(absolute[3]);
@@ -2315,10 +2464,16 @@ function parseReminderRequest(user, text, now = Date.now()) {
   if (startHour > 23 || endHour > 23 || startMinute > 59 || endMinute > 59) return null;
 
   const today = localDateKey(user, now);
-  const dateKey = absolute[1] === 'завтра' ? addLocalDays(today, 1) : today;
-  const startAt = localDateTimeToTimestamp(user, dateKey, startHour, startMinute);
+  let dateKey = absolute[1] === 'завтра' ? addLocalDays(today, 1) : today;
+  let startAt = localDateTimeToTimestamp(user, dateKey, startHour, startMinute);
   let endAt = localDateTimeToTimestamp(user, dateKey, endHour, endMinute);
   if (endAt < startAt) endAt = startAt;
+  if (!absolute[1] && endAt < now) {
+    dateKey = addLocalDays(today, 1);
+    startAt = localDateTimeToTimestamp(user, dateKey, startHour, startMinute);
+    endAt = localDateTimeToTimestamp(user, dateKey, endHour, endMinute);
+    if (endAt < startAt) endAt = startAt;
+  }
   if (endAt < now) return null;
   const selectedAt = startAt + Math.floor(Math.random() * (endAt - startAt + 1));
   return createReminder(text, Math.max(now + 1000, selectedAt), endAt, {

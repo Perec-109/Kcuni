@@ -17,7 +17,7 @@ const USERS_FILE = new URL('../data/users.json', import.meta.url);
 const MAX_MESSAGES_PER_REPLY = Number(env.MAX_MESSAGES_PER_REPLY || 2);
 const DEFAULT_TIMEZONE = env.DEFAULT_TIMEZONE || 'Europe/Minsk';
 const DEFAULT_PROACTIVE_SCHEDULE = parseSchedule(env.PROACTIVE_SCHEDULE || '13:00,21:00,23:30');
-const BUILD_VERSION = '2026-07-21-video-understanding-1';
+const BUILD_VERSION = '2026-07-23-suicide-memory-reset-1';
 const REMINDER_MINUTE_MS = Math.max(25, Number(env.REMINDER_MINUTE_MS || 60_000));
 const TELEGRAM_DOWNLOAD_LIMIT_BYTES = 20 * 1024 * 1024;
 
@@ -82,6 +82,7 @@ async function configureTelegramMenu() {
     { command: 'stickers', description: 'Посмотреть память стикеров' },
     { command: 'feedback', description: 'Что Kcuni выучила из твоих поправок' },
     { command: 'reminders', description: 'Посмотреть таймеры и напоминания' },
+    { command: 'suicide', description: 'Полностью стереть память этого чата' },
     { command: 'status', description: 'Проверить работу Kcuni' },
     { command: 'help', description: 'Все команды Kcuni' }
   ];
@@ -508,11 +509,17 @@ async function handleMessage(message) {
   }
 
   if (text === '/forget') {
-    user.memory = [];
-    user.conversationLog = [];
-    user.memorySummaries = { daily: [], weekly: [], monthly: [] };
-    await saveUsers();
-    await send(chatId, 'окей, память по тебе очистила');
+    await eraseUserProfile(chatId);
+    await send(chatId, 'окей, полностью очистила память этого чата');
+    return;
+  }
+
+  if (text === '/suicide') {
+    await eraseUserProfile(chatId);
+    await send(chatId, [
+      'всё. я полностью стёрла память этого чата.',
+      'история, сводки, темы, стикеры, планы, настройки ответов и напоминания удалены. следующее сообщение будет как первый разговор.'
+    ]);
     return;
   }
 
@@ -785,9 +792,15 @@ function commandHelp() {
     '/feedback clear - забыть все поправки',
     '/reminders - таймеры и точные напоминания',
     '/reminders clear - отменить все напоминания',
+    '/suicide - полностью стереть память этого чата',
     '/status - версия, AI, память и авторежим',
-    '/forget - очистить память'
+    '/forget - то же полное удаление памяти'
   ];
+}
+
+async function eraseUserProfile(chatId) {
+  delete users[String(chatId)];
+  await saveUsers();
 }
 
 function contextualLocalReply(user, text) {

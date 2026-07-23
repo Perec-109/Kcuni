@@ -100,13 +100,13 @@ try {
   assert.ok(commandMenu);
   assert.deepEqual(
     commandMenu.body.commands.map(({ command }) => command),
-    ['style', 'timezone', 'location', 'schedule', 'proactive', 'headline', 'news_week', 'memory', 'stickers', 'feedback', 'reminders', 'status', 'help']
+    ['style', 'timezone', 'location', 'schedule', 'proactive', 'headline', 'news_week', 'memory', 'stickers', 'feedback', 'reminders', 'suicide', 'status', 'help']
   );
   assert.ok(calls.some((call) => call.method === 'setChatMenuButton' && call.body.menu_button?.type === 'commands'));
 
   const health = await fetch(`http://127.0.0.1:${appPort}/healthz`);
   assert.equal(health.status, 200);
-  assert.deepEqual(await health.json(), { ok: true, service: 'kcuni-bot', version: '2026-07-21-video-understanding-1' });
+  assert.deepEqual(await health.json(), { ok: true, service: 'kcuni-bot', version: '2026-07-23-suicide-memory-reset-1' });
 
   const unauthorized = await fetch(`http://127.0.0.1:${appPort}/telegram/webhook`, { method: 'POST', body: '{}' });
   assert.equal(unauthorized.status, 401);
@@ -130,7 +130,7 @@ try {
   await waitForMessageContaining('команды Kcuni', 5000);
 
   await postUpdate({ text: '/status@kcuni_smoke_bot' });
-  await waitForMessageContaining('Kcuni 2026-07-21-video-understanding-1', 5000);
+  await waitForMessageContaining('Kcuni 2026-07-23-suicide-memory-reset-1', 5000);
 
   await postUpdate({ text: '/unknown_command@kcuni_smoke_bot' });
   await waitForMessageContaining('не знаю такую команду', 5000);
@@ -247,6 +247,15 @@ try {
   const greetingMessageCount = sentMessages().length;
   await postUpdate({ text: 'поздоровайся со мной' });
   await waitFor(() => sentMessages().slice(greetingMessageCount).some((text) => /привет|здорово/.test(text)), 5000);
+
+  const suicideMessageCount = sentMessages().length;
+  await postUpdate({ text: '/suicide' });
+  await waitFor(() => sentMessages().slice(suicideMessageCount).some((text) => text.includes('полностью стёрла память')), 5000);
+  const emptyMemoryMessageCount = sentMessages().length;
+  await postUpdate({ text: '/memory' });
+  await waitFor(() => sentMessages().slice(emptyMemoryMessageCount).some((text) => text.includes('почти ничего не помню')), 5000);
+  assert.ok(sentMessages().slice(emptyMemoryMessageCount).some((text) => text.includes('почти ничего не помню')));
+  assert.ok(sentMessages().slice(emptyMemoryMessageCount).every((text) => !text.includes('Минск')));
 
   assert.ok(calls.some((call) => call.method === 'setWebhook'));
   console.log('Kcuni webhook, memory, sticker and schedule smoke tests passed.');
